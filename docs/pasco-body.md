@@ -1,493 +1,391 @@
-# PaSCo Human Body Completion Adaptation Plan (v3.0)
+# PaSCo Human Body Adaptation Plan (v4.1)
+
+> **Revision History:**
+> - v4.1: Added eval.py modification, complete interface contract, feature dimension risk, augmentation risk
+> - v4.0: Initial three-layer boundary model
 
 ## Executive Summary
 
-Adapt PaSCo (Panoptic Scene Completion) from autonomous driving to human body completion.
+**Goal:** Migrate PaSCo from autonomous driving to human body scene completion.
 
 **Core Principle:** Correct migration first, minimize changes to original PaSCo.
 
-**Core Challenges:** 50x scale difference + simplified input features (3D vs 283D) + extreme class imbalance + dynamic grid sizes.
+**Key Insight:** PaSCo's sparse convolution architecture is highly parameterized. Most adaptation can be achieved through **data adaptation layer** without touching model internals.
 
 ---
 
-## 1. Data Specification (Verified from Dataset)
+## 1. Architectural Analysis
+
+### 1.1 Three-Layer Boundary Model
 
 ```
-Dataset: E:\CODE\PaSCo-Rep-SepConv\Dataset\voxel_data
-Files: 4028 samples (.npz)
-
-NPZ Structure:
-- sensor_pc:      (N, 3) float32    # Surface point cloud, N ~ 16K-131K
-- voxel_labels:   (D, H, W) uint8   # Dense label grid, labels 0-70
-- grid_world_min: (3,) float32      # World coordinate bounds
-- grid_world_max: (3,) float32
-- grid_voxel_size: (3,) float32     # Always [4, 4, 4] mm
-- grid_occ_size:  (3,) int32        # Grid dimensions
+┌─────────────────────────────────────────────────────────────────┐
+│  Layer 1: Data Adaptation Layer  (NEW - must create)            │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  params.py          - Class definitions, frequencies    │    │
+│  │  human_body_dataset - NPZ loading, voxelization         │    │
+│  │  collate.py         - Batch assembly                    │    │
+│  │  human_body_dm.py   - Lightning DataModule              │    │
+│  └─────────────────────────────────────────────────────────┘    │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 2: Interface Layer  (MODIFY - minimal surgery)           │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  train.py           - Dataset selection dispatch         │    │
+│  │  eval.py            - Dataset selection dispatch         │    │
+│  │  net_panoptic.py    - Parameterize thing_ids injection   │    │
+│  └─────────────────────────────────────────────────────────┘    │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 3: Model Core  (DO NOT TOUCH)                            │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  encoder_v2.py      - Sparse 3D encoder                  │    │
+│  │  decoder_v3.py      - Sparse 3D decoder + transformer    │    │
+│  │  unet3d_sparse_v2.py- UNet backbone (already parameterized)│  │
+│  │  criterion_sparse.py- Loss computation                   │    │
+│  │  helper.py          - Inference utilities                │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Statistics
+### 1.2 Key Discovery: What's Already Parameterized
 
-| Metric              | Original PaSCo        | Human Body                       |
-| ------------------- | --------------------- | -------------------------------- |
-| Voxel size          | 200mm                 | 4mm (50x smaller)                |
-| Grid shape          | Fixed 256x256x32      | Dynamic 75-129 x 50-110 x 37-249 |
-| Total voxels/sample | ~2M                   | 220K - 3M                        |
-| Classes             | 20                    | 71 (0-70)                        |
-| Input features      | 283D (xyz+vote+embed) | 3D (xyz only)                    |
-| Points/sample       | ~100K                 | 16K-131K (avg 55K)               |
+| Parameter | Location | Status |
+|-----------|----------|--------|
+| `in_channels` | CylinderFeat | Parameterized via `fea_dim` |
+| `n_classes` | Net.__init__ | CLI configurable |
+| `class_weights` | Net.__init__ | Computed from frequencies |
+| `f` (base channels) | Net.__init__ | CLI configurable |
+| `scene_size` (training) | helper.py:432 | Dynamic via `compute_scene_size()` |
 
-### Class Distribution (Critical)
+### 1.3 What Must Be Modified (Minimal Set)
 
-```
-Label  0 (background): 51% of all voxels
-Label  1 (major tissue): 37%
-Labels 2-70: Remaining 12% (extremely imbalanced)
-```
-
-Top classes: 0, 1, 15, 2, 20, 18, 23, 67, 68, 11, 6, 62, 61, 3, 57, 58, 69, 70, 5, 4
+| Issue | Location | Required Change |
+|-------|----------|-----------------|
+| `thing_ids` hardcoded import | net_panoptic_sparse.py:20 | Parameterize via constructor |
+| `thing_ids` not passed to Net | train.py:146-172 | Add `thing_ids=thing_ids` to Net() |
+| `n_classes` hardcoded | train.py:115 | Add CLI param `--n_classes` |
+| `in_channels` default 283 | net_panoptic_sparse.py:51 | Add CLI param `--in_channels` |
+| `scene_size` hardcoded in ensemble | ensembler.py (multiple) | **Avoided by n_infers=1** |
+| Dataset dispatch | train.py, eval.py | Add conditional import |
+| Multi-scale label hardcode | human_body_dataset.py | Use `n_classes+1` instead of 21 |
 
 ---
 
-## 2. Code Analysis: What Can Be Configured vs What Must Be Modified
+## 2. Constraint Analysis
 
-### 2.1 Configurable Parameters (NO code changes needed)
+### 2.1 Scale Constraint
+- Human body: 4mm voxels (50x smaller than KITTI's 200mm)
+- Grid dimensions: Dynamic (75-129 x 50-110 x 37-249)
+- **Implication:** MinkowskiEngine handles natively; no architecture change needed
 
-| Parameter           | Location     | How to Configure                |
-| ------------------- | ------------ | ------------------------------- |
-| `n_classes`         | Net.__init__ | CLI `--n_classes` or config     |
-| `in_channels`       | Net.__init__ | CLI arg (default 283, set to 3) |
-| `class_weights`     | Net.__init__ | Computed from params.py         |
-| `class_frequencies` | Net.__init__ | From params.py                  |
-| `f` (base channels) | Net.__init__ | CLI `--f`                       |
-| `f_maps`            | UNet3DV2     | Derived from `f`                |
-| `num_queries`       | Net.__init__ | CLI `--num_queries`             |
-| `is_predict_panop`  | forward()    | Runtime flag                    |
-| `heavy_decoder`     | Net.__init__ | CLI `--heavy_decoder`           |
+### 2.2 Feature Constraint
+- KITTI: 283D features (xyz_offset(3) + xyz(3) + vote(3) + intensity(1) + embedding(256) + ...)
+- Human body: 3D features (xyz only)
+- **Implication:** `CylinderFeat(fea_dim=3)` - already parameterized
+- **Risk:** 283→3 feature compression may cause information loss; monitor baseline performance
 
-**Key Discovery:** `CylinderFeat(fea_dim=in_channels)` - input feature dimension is already parameterized!
+### 2.3 Class Constraint
+- KITTI: 20 classes, 8 "thing" classes with instances
+- Human body: 71 classes (0-70), no instance labels
+- **Implication:** `thing_ids=[]` for semantic-only mode
 
-### 2.2 Hardcoded Values Requiring Code Changes
-
-| Hardcoded Value                                    | File:Line                 | Impact               | Required Change        |
-| -------------------------------------------------- | ------------------------- | -------------------- | ---------------------- |
-| `scene_size = (256//scale, 256//scale, 32//scale)` | net_panoptic_sparse.py:84 | Ensembler operations | Make configurable      |
-| `from ...params import thing_ids`                  | net_panoptic_sparse.py:20 | Import path          | Pass as parameter      |
-| `KittiDataModule` import                           | train.py:2                | Dataset selection    | Add conditional import |
-| `class_names, class_frequencies` import            | train.py:9                | Dataset params       | Add conditional import |
-
-### 2.3 Architecture (DO NOT MODIFY in Phase 1)
-
-| Component          | Current Design         | Notes                   |
-| ------------------ | ---------------------- | ----------------------- |
-| Encoder levels     | 4 levels (s1→s2→s4→s8) | Keep as-is for baseline |
-| f_maps             | [f, f*2, f*4, f*4]     | Keep as-is              |
-| Decoder structure  | 3-level upsampling     | Keep as-is              |
-| Pruning thresholds | Dynamic                | Keep as-is              |
-
-**Rationale:** Verify baseline works correctly before any architectural changes.
+### 2.4 MIMO Constraint (Critical)
+- `ensembler.py` hardcodes `(256, 256, 32)` for multi-subnet alignment
+- **Implication:** Must use `n_infers=1` to bypass ensemble code path
 
 ---
 
-## 3. Architecture Decisions
+## 3. Migration Strategy
 
-### 3.1 Decision: Semantic-Only Mode First
+### 3.1 Phase 1: Data-Only Migration (Target State)
 
-**Rationale:**
+**Principle:** All changes confined to Data Adaptation Layer + minimal Interface Layer surgery.
 
-1. Dataset has NO instance labels (only semantic voxel_labels)
-2. Panoptic adds complexity without ground truth
-3. Focus on core SSC (Semantic Scene Completion) task first
+```
+Changes Required:
+├── CREATE: pasco/data/human_body/
+│   ├── __init__.py
+│   ├── params.py           # Class definitions
+│   ├── human_body_dataset.py
+│   ├── collate.py
+│   └── human_body_dm.py
+├── CREATE: scripts/
+│   └── compute_human_body_freq.py  # Utility to compute class frequencies
+├── MODIFY: scripts/train.py
+│   └── Add dataset dispatch, --n_classes, --in_channels params
+├── MODIFY: scripts/eval.py
+│   └── Add dataset dispatch (same pattern as train.py)
+└── MODIFY: pasco/models/net_panoptic_sparse.py
+    └── Line 20: Remove hardcoded import, add thing_ids parameter
+```
 
-**Implementation:**
+### 3.2 Interface Contract
 
-- Set `is_predict_panop=False` at runtime
-- Set `thing_ids=[]` (empty list for no instance classes)
-- Panoptic loss terms automatically disabled when thing_ids is empty
-
-### 3.2 Decision: Input Feature Strategy
-
-**Analysis of CylinderFeat (unet3d_sparse_v2.py:15-86):**
+**Dataset.__getitem__() must return:**
 
 ```python
-class CylinderFeat(nn.Module):
-    def __init__(self, fea_dim=3, out_pt_fea_dim=64, ...):
-        # MLP: fea_dim → 64 → 128 → 256 → out_pt_fea_dim
-        # Uses scatter_max for voxel aggregation
-```
+{
+    # Required for forward pass
+    "in_feat": Tensor[N, 3],        # Point features (xyz)
+    "in_coord": Tensor[N, 3],       # Voxel coordinates (int)
+    "min_C": Tensor[3],             # Min coordinate bound
+    "max_C": Tensor[3],             # Max coordinate bound
+    "T": Tensor[4, 4],              # Augmentation transform
+    "xyz": Tensor[N, 3],            # Original point cloud coordinates
 
-**Key Finding:** `fea_dim` is already a parameter! No structural change needed.
+    # Required for loss computation
+    "semantic_label": Tensor[D, H, W],  # Dense semantic grid (augmented)
+    "geo_labels": {"1_1": ..., "1_2": ..., "1_4": ...},
+    "sem_labels": {"1_1": ..., "1_2": ..., "1_4": ...},
 
-**Strategy:**
+    # Required for collate (pre-augmentation labels)
+    "semantic_label_origin": Tensor[D, H, W],  # Dense semantic grid (original)
+    "instance_label_origin": Tensor[D, H, W],  # Dense instance grid (original)
+    "mask_label_origin": {"labels": [], "masks": []},  # Original mask labels
 
-| Phase   | Features      | Dimension | Config Change     |
-| ------- | ------------- | --------- | ----------------- |
-| Phase 1 | xyz only      | 3D        | `--in_channels=3` |
-| Phase 2 | xyz + density | 4D        | `--in_channels=4` |
+    # Instance-related (zeros for semantic-only mode)
+    "instance_label": Tensor[D, H, W],  # Can be zeros
+    "mask_label": {"labels": [], "masks": []},  # Empty lists for semantic-only
+    "input_pcd_instance_label": Tensor[N],  # Can be zeros
 
-### 3.3 Decision: Dynamic Grid Handling
-
-**Problem:** Grid sizes vary (75-129 × 50-110 × 37-249)
-
-**Solution:** MinkowskiEngine handles this natively via sparse tensors.
-
-- No padding needed
-- Batch index distinguishes samples
-- Labels stored as list (variable sizes)
-
-### 3.4 Receptive Field Analysis (For Future Reference)
-
-Original PaSCo with 4-level encoder (stride 1→2→4→8):
-
-- RF at bottleneck: ~16 voxels × 200mm = 3.2m (sufficient for vehicles)
-
-Human body at 4mm voxel with same architecture:
-
-- RF: ~16 voxels × 4mm = 64mm = 6.4cm
-
-**Note:** This may be insufficient for organ-level reasoning (15-25cm needed).
-**Action:** Validate baseline first. If RF is the bottleneck, consider adding encoder level in Phase 2.
-
----
-
-## 4. Implementation Strategy
-
-### Phase 0: Data Pipeline (MUST DO)
-
-#### 4.1 params.py - Class Definitions
-
-**File:** `pasco/data/human_body/params.py`
-
-```python
-n_classes = 71  # 0-70 inclusive
-class_names = [...]  # 71 anatomical structure names
-thing_ids = []  # Empty for semantic-only mode
-class_frequencies = {
-    "1_1": [...],  # Scale 1 frequencies
-    "1_2": [...],  # Scale 2 frequencies
-    "1_4": [...],  # Scale 4 frequencies
+    # Metadata
+    "frame_id": str,
+    "sequence": str,
 }
 ```
 
-**Prerequisite:** Run frequency analysis script to compute exact counts.
+**Critical Notes:**
+1. Collate function must produce `global_min_Cs`, `global_max_Cs` aligned to `complete_scale=8`
+2. Coordinate alignment: `min_C = floor(min_C / complete_scale) * complete_scale`
+3. For semantic-only mode: `mask_label["labels"]=[]`, `mask_label["masks"]=[]`
 
-#### 4.2 human_body_dataset.py - Core Dataset
-
-**Required Interface (must match KittiDataset output):**
-
-```python
-def __getitem__(self, idx) -> dict:
-    return {
-        "frame_id": str,
-        "sequence": str,
-        "in_feat": Tensor[N, feat_dim],  # Point features
-        "in_coord": Tensor[N, 3],        # Voxel coordinates (int)
-        "T": Tensor[4, 4],               # Transform matrix
-        "min_C": Tensor[3],              # Min coord bound
-        "max_C": Tensor[3],              # Max coord bound
-        "semantic_label": Tensor[...],   # Dense semantic labels
-        "instance_label": Tensor[...],   # Can be zeros
-        "mask_label": Tensor[...],       # Can be zeros
-        "geo_labels": dict,              # Multi-scale geometry
-        "sem_labels": dict,              # Multi-scale semantics
-        # ... other fields
-    }
-```
-
-**Data flow:**
-
-1. Load NPZ → extract sensor_pc, voxel_labels, grid metadata
-2. Point-to-voxel: `floor((xyz - grid_min) / voxel_size)`
-3. Remove duplicates via `np.unique` with scatter_max
-4. Features: xyz coordinates (optionally normalized)
-5. Generate multi-scale labels via majority-vote downsampling
-6. Return dict compatible with existing collate
-
-**Augmentation:**
-
-- Rotation: 360° around vertical axis
-- Flip: X and Y axes
-- Scale: 0.95-1.05 range
-
-#### 4.3 collate.py - Batch Assembly
-
-Use existing collate pattern from `pasco/data/semantic_kitti/collate.py`.
-
-Key design:
-
-- Concatenate coords with batch index prefix
-- Store labels as list (variable sizes)
-- Compute global min/max for decoder bounds
-
-#### 4.4 human_body_dm.py - DataModule
-
-**Split strategy (no predefined split):**
-
-- Deterministic split via sorted filenames + modulo
-- 80/10/10: 3222 train / 403 val / 403 test
-- Fixed random seed for reproducibility
-
-### Phase 1: Minimal Model Adaptation (REQUIRED)
-
-#### 4.5 train.py Modification
-
-**Current (hardcoded):**
-
-```python
-from pasco.data.semantic_kitti.kitti_dm import KittiDataModule
-from pasco.data.semantic_kitti.params import class_names, class_frequencies
-```
-
-**Change to (conditional):**
-
-```python
-@click.option('--dataset', default="semantic_kitti", type=click.Choice(["semantic_kitti", "human_body"]))
-def main(..., dataset, ...):
-    if dataset == "semantic_kitti":
-        from pasco.data.semantic_kitti.kitti_dm import KittiDataModule as DataModule
-        from pasco.data.semantic_kitti.params import class_names, class_frequencies, thing_ids
-    elif dataset == "human_body":
-        from pasco.data.human_body.human_body_dm import HumanBodyDataModule as DataModule
-        from pasco.data.human_body.params import class_names, class_frequencies, thing_ids
-```
-
-#### 4.6 net_panoptic_sparse.py Modification
-
-**Issue 1: thing_ids hardcoded import**
-
-```python
-# Current (line 20):
-from pasco.data.semantic_kitti.params import thing_ids
-
-# Change to: Pass thing_ids as constructor parameter
-def __init__(self, ..., thing_ids=None, ...):
-    self.thing_ids = thing_ids if thing_ids is not None else []
-```
-
-**Issue 2: scene_size hardcoded**
-
-```python
-# Current (line 84):
-self.scene_size = (256 // scale, 256 // scale, 32 // scale)
-
-# Change to: Pass as parameter or compute from data
-def __init__(self, ..., scene_size=None, ...):
-    if scene_size is None:
-        scene_size = (256 // scale, 256 // scale, 32 // scale)
-    self.scene_size = scene_size
-```
-
-**Note:** scene_size is used in ensembler. For human body with dynamic grids, may need per-batch computation.
-
-### Phase 2: Performance Optimization (ONLY IF NEEDED)
-
-**Do NOT implement these until baseline is validated:**
-
-1. Add 5th encoder level (s8→s16) if RF insufficient
-2. Dilated convolutions if context still lacking
-3. Attention mechanism for global context
-4. Pruning threshold tuning
-
----
-
-## 5. Implementation File Summary (Revised Priority)
-
-### Must Create (P0)
-
-| File                                          | Purpose                             |
-| --------------------------------------------- | ----------------------------------- |
-| `pasco/data/human_body/__init__.py`           | Module init                         |
-| `pasco/data/human_body/params.py`             | Classes, frequencies, thing_ids     |
-| `pasco/data/human_body/human_body_dataset.py` | Core dataset                        |
-| `pasco/data/human_body/collate.py`            | Batch assembly                      |
-| `pasco/data/human_body/human_body_dm.py`      | Lightning DataModule                |
-| `configs/human-body.yaml`                     | Data config (class mapping, splits) |
-| `scripts/compute_class_freq.py`               | Frequency analysis tool             |
-
-### Must Modify (P0)
-
-| File                                  | Change                             |
-| ------------------------------------- | ---------------------------------- |
-| `scripts/train.py`                    | Add dataset selection logic        |
-| `pasco/models/net_panoptic_sparse.py` | Parameterize thing_ids, scene_size |
-
-### Do NOT Modify (Phase 1)
-
-| File                               | Reason                     |
-| ---------------------------------- | -------------------------- |
-| `pasco/models/encoder_v2.py`       | Keep original architecture |
-| `pasco/models/decoder_v3.py`       | Keep original architecture |
-| `pasco/models/unet3d_sparse_v2.py` | Already parameterized      |
-
----
-
-## 6. Training Configuration
-
-### 6.1 CLI Parameters for Human Body
+### 3.3 Configuration for Human Body
 
 ```bash
 python scripts/train.py \
     --dataset human_body \
-    --dataset_root "E:/CODE/PaSCo-Rep-SepConv/Dataset/voxel_data" \
-    --config_path "configs/human-body.yaml" \
     --in_channels 3 \
     --n_classes 71 \
+    --n_infers 1 \           # CRITICAL: Disable MIMO
+    --heavy_decoder False \  # Memory optimization
     --lr 1e-4 \
-    --bs 1 \
-    --n_infers 1 \
-    --heavy_decoder False \
-    --data_aug True
+    --bs 1
 ```
-
-### 6.2 Key Hyperparameters
-
-| Parameter        | Value | Rationale                         |
-| ---------------- | ----- | --------------------------------- |
-| in_channels      | 3     | xyz only                          |
-| n_classes        | 71    | 0-70 labels                       |
-| lr               | 1e-4  | Lower than original, more classes |
-| batch_size       | 1     | Memory constraints                |
-| n_infers         | 1     | Disable MIMO initially            |
-| is_predict_panop | False | Semantic only                     |
-
-### 6.3 Class Imbalance Strategy
-
-1. **Inverse-frequency weighting** with power scaling:
-   
-   ```
-   raw_weight = max_freq / class_freq
-   scaled_weight = raw_weight ^ (1/3)
-   ```
-
-2. **Lovász-Softmax loss** (already in codebase)
-
-3. **Monitor per-class IoU** during training
 
 ---
 
-## 7. Verification Checklist
+## 4. Implementation Priorities
 
-### Stage 1: Data Pipeline Validation
+### P0: Must Do (Correctness)
 
-- [ ] Load single NPZ, verify all fields present
-- [ ] Point-to-voxel conversion correct
-- [ ] Dataset __getitem__ returns compatible dict
-- [ ] Collate produces valid batch structure
-- [ ] Multi-scale labels shapes correct (1:1, 1:2, 1:4)
-- [ ] Class frequency matches expected distribution
+1. **Data Pipeline** - Create all files in `pasco/data/human_body/`
+2. **Interface Surgery** - Parameterize `thing_ids` in Net constructor
+3. **Train Dispatch** - Add dataset selection in `train.py`
 
-### Stage 2: Model Forward Pass (No Training)
+### P1: Should Do (Robustness)
 
-- [ ] CylinderFeat accepts 3D input
-- [ ] Encoder produces 4-level features
-- [ ] Decoder outputs 71-class logits
-- [ ] No runtime errors with single sample
-- [ ] Peak GPU memory acceptable
+4. **Class Frequency Analysis** - Compute accurate weights from dataset
+5. **Multi-scale Label Generation** - Verify downsampling logic
 
-### Stage 3: Training Sanity
+### P2: Deferred (Optimization)
 
-- [ ] Single batch overfit: loss decreases
-- [ ] Gradient flow: no NaN/Inf
-- [ ] All 71 classes have non-zero gradients
-- [ ] Validation metrics computed
+6. **Receptive Field** - Validate 4-level encoder sufficiency
+7. **MIMO Support** - Modify ensembler if needed (unlikely)
+8. **Architecture Tuning** - Add encoder levels if RF insufficient
+
+---
+
+## 5. Modification Details
+
+### 5.1 net_panoptic_sparse.py Modification
+
+**Current (line 20):**
+```python
+from pasco.data.semantic_kitti.params import thing_ids
+```
+
+**Target:**
+```python
+# Remove hardcoded import
+# Add thing_ids as constructor parameter with default
+def __init__(self, ..., thing_ids=None, ...):
+    self.thing_ids = thing_ids if thing_ids is not None else []
+```
+
+**Rationale:** Single point of change, backward compatible with default.
+
+### 5.2 train.py Modification
+
+**Current:**
+```python
+from pasco.data.semantic_kitti.kitti_dm import KittiDataModule
+from pasco.data.semantic_kitti.params import class_names, class_frequencies
+# ...
+n_classes = 20  # Line 115: hardcoded
+# ...
+model = Net(
+    n_classes=n_classes,
+    # thing_ids not passed - uses hardcoded import
+)
+```
+
+**Target:**
+```python
+# Add new CLI options
+@click.option('--dataset', default="semantic_kitti",
+              type=click.Choice(["semantic_kitti", "human_body"]))
+@click.option('--n_classes', default=20, help='Number of semantic classes')
+@click.option('--in_channels', default=283, help='Input feature dimension')
+def main(..., dataset, n_classes, in_channels, ...):
+    # Dataset dispatch
+    if dataset == "semantic_kitti":
+        from pasco.data.semantic_kitti.kitti_dm import KittiDataModule as DataModule
+        from pasco.data.semantic_kitti.params import (class_names, class_frequencies, thing_ids)
+    elif dataset == "human_body":
+        from pasco.data.human_body.human_body_dm import HumanBodyDataModule as DataModule
+        from pasco.data.human_body.params import (class_names, class_frequencies, thing_ids)
+
+    # Pass thing_ids to Net constructor
+    model = Net(
+        n_classes=n_classes,
+        in_channels=in_channels,
+        thing_ids=thing_ids,  # NEW: pass thing_ids
+        # ... other params
+    )
+```
+
+**Rationale:** Clean dispatch pattern, parameterized n_classes/in_channels, thing_ids passed to model.
+
+### 5.3 eval.py Modification
+
+**Current:**
+```python
+from pasco.data.semantic_kitti.kitti_dm import KittiDataModule
+from pasco.data.semantic_kitti.params import class_frequencies
+```
+
+**Target:**
+```python
+@click.option('--dataset', default="semantic_kitti",
+              type=click.Choice(["semantic_kitti", "human_body"]))
+def main(..., dataset, ...):
+    if dataset == "semantic_kitti":
+        from pasco.data.semantic_kitti.kitti_dm import KittiDataModule as DataModule
+        from pasco.data.semantic_kitti.params import class_frequencies
+    elif dataset == "human_body":
+        from pasco.data.human_body.human_body_dm import HumanBodyDataModule as DataModule
+        from pasco.data.human_body.params import class_frequencies
+
+    data_module = DataModule(...)
+```
+
+**Rationale:** Same dispatch pattern as train.py for consistency.
+
+---
+
+## 6. Validation Strategy
+
+### Stage 1: Data Pipeline Isolation Test
+- Load single sample, verify all fields present
+- Verify coordinate conversion: `floor((xyz - grid_min) / voxel_size)`
+- Verify multi-scale labels shapes match expected ratios
+
+### Stage 2: Forward Pass Test (No Training)
+- Single sample through model
+- Check: CylinderFeat accepts 3D input
+- Check: Output logits have 71 channels
+- Check: No runtime errors
+
+### Stage 3: Training Sanity Test
+- Single batch overfit (loss should decrease)
+- Check gradient flow (no NaN/Inf)
+- Check per-class loss distribution
 
 ### Stage 4: Baseline Validation
-
-- [ ] 10 epochs without crash
-- [ ] Loss consistently decreasing
-- [ ] mIoU > 0 (model learning something)
-- [ ] Per-class IoU: check for mode collapse
+- 10 epochs without crash
+- mIoU > 0 (model learning)
+- Per-class IoU distribution (check for mode collapse)
 
 ---
 
-## 8. Risk Analysis & Mitigations
+## 7. Risk Mitigation
 
-### Risk 1: Memory OOM with Large Grids
+### Risk 1: Memory OOM
+- **Trigger:** Large grids (3M voxels)
+- **Mitigation:** `bs=1`, FP16, gradient accumulation, sample filtering
 
-**Probability:** High
-**Mitigations:**
-
-1. Mixed precision (FP16)
-2. Batch size = 1
-3. Gradient accumulation
-4. Skip samples > 500K voxels initially
-
-### Risk 2: Class Imbalance Mode Collapse
-
-**Probability:** High
-**Mitigations:**
-
-1. Power-scaled class weights
-2. Lovász-Softmax loss
-3. Monitor per-class IoU
-4. Early stopping on validation mIoU
+### Risk 2: Class Imbalance Collapse
+- **Trigger:** 51% background dominates
+- **Mitigation:** Power-scaled weights, Lovasz-Softmax, per-class monitoring
 
 ### Risk 3: Insufficient Receptive Field
+- **Trigger:** Poor large-structure segmentation
+- **Mitigation:** Validate baseline first; defer architecture changes to Phase 2
 
-**Probability:** Medium
-**Mitigations:**
+### Risk 4: Dynamic Grid Incompatibility
+- **Trigger:** Ensemble code expects fixed grid
+- **Mitigation:** `n_infers=1` bypasses ensemble entirely
 
-1. Validate baseline first
-2. Add encoder level only if confirmed needed
-3. Reserve attention mechanism for future
+### Risk 5: Feature Dimension Information Loss
+- **Trigger:** KITTI uses 283D features, human body uses only 3D (xyz)
+- **Symptoms:** Model underfits, poor convergence, low mIoU
+- **Mitigation:**
+  1. Monitor baseline performance carefully
+  2. If insufficient, consider adding engineered features (normals, curvature)
+  3. Defer to Phase 2 if needed
 
----
-
-## 9. Decision Log
-
-| Version | Decision                                     | Rationale                               |
-| ------- | -------------------------------------------- | --------------------------------------- |
-| v2.0    | Semantic-only mode                           | No instance labels in dataset           |
-| v2.0    | Reuse CylinderFeat                           | Already parameterized for input dim     |
-| v3.0    | **Remove** encoder modification from Phase 1 | Verify baseline first, minimize changes |
-| v3.0    | Parameterize thing_ids                       | Avoid hardcoded import                  |
-| v3.0    | Parameterize scene_size                      | Support dynamic grids                   |
-| v3.0    | Keep original architecture in Phase 1        | Correct migration > optimization        |
+### Risk 6: Data Augmentation Mismatch
+- **Trigger:** KITTI augmentation params (max_angle=5.0) designed for driving scenes
+- **Mitigation:** Tune augmentation for human body (larger rotation range, appropriate flip axes)
 
 ---
 
-## 10. Data Flow Diagram
+## 8. Decision Record
 
-```
-NPZ File (human body)
-    │
-    ├─► sensor_pc (N, 3)           voxel_labels (D, H, W)
-    │        │                            │
-    │   point_to_voxel()             multi_scale_downsample()
-    │   (floor division)                  │
-    │        │                            │
-    │        ▼                            ▼
-    │   coords (M, 3) int         labels_1x, labels_2x, labels_4x
-    │   feats (M, 3) float
-    │        │
-    │        ▼
-    │   CylinderFeat(fea_dim=3)    ← No change needed!
-    │        │
-    │        ▼
-    │   ME.SparseTensor
-    │        │
-    │        ▼
-    │   Encoder (4 levels)         ← Keep original
-    │        │
-    │        ▼
-    │   Dense Bottleneck
-    │        │
-    │        ▼
-    │   Decoder                    ← Keep original
-    │        │
-    │        ▼
-    │   71-class logits
-```
+| Decision | Rationale |
+|----------|-----------|
+| `n_infers=1` mandatory | Ensembler hardcodes (256,256,32) |
+| `thing_ids=[]` | No instance labels in dataset |
+| `in_channels=3` | xyz-only features sufficient for baseline |
+| Defer architecture changes | Verify correct migration first |
+| Parameterize via constructor | Minimal code change, backward compatible |
 
 ---
 
-## 11. Quick Start Implementation Order
+## 9. File Checklist
 
-1. **Create params.py** - Define 71 classes, compute frequencies
-2. **Create human_body_dataset.py** - Implement __getitem__
-3. **Create collate.py** - Copy from semantic_kitti, adjust
-4. **Create human_body_dm.py** - Implement DataModule
-5. **Modify train.py** - Add dataset selection
-6. **Modify net_panoptic_sparse.py** - Parameterize thing_ids, scene_size
-7. **Test forward pass** - Single sample, check shapes
-8. **Test training** - Single batch overfit
-9. **Full training** - Monitor metrics
+### Create (Data Adaptation Layer)
+- [ ] `pasco/data/human_body/__init__.py`
+- [ ] `pasco/data/human_body/params.py`
+- [ ] `pasco/data/human_body/human_body_dataset.py`
+- [ ] `pasco/data/human_body/collate.py`
+- [ ] `pasco/data/human_body/human_body_dm.py`
+
+### Create (Utility Scripts)
+- [ ] `scripts/compute_human_body_freq.py` - Compute class frequencies from dataset
+
+### Modify (Interface Layer)
+- [ ] `scripts/train.py` - Dataset dispatch, --n_classes, --in_channels, thing_ids pass-through
+- [ ] `scripts/eval.py` - Dataset dispatch (same pattern as train.py)
+- [ ] `pasco/models/net_panoptic_sparse.py` - thing_ids parameter in constructor
+
+### Do Not Modify
+- [ ] `pasco/models/encoder_v2.py`
+- [ ] `pasco/models/decoder_v3.py`
+- [ ] `pasco/models/unet3d_sparse_v2.py`
+- [ ] `pasco/models/ensembler.py`
+- [ ] `pasco/loss/*`
+
+---
+
+## 10. Success Criteria
+
+**Phase 1 Complete When:**
+1. Training runs without error for 10 epochs
+2. Loss consistently decreases
+3. mIoU > 0 on validation set
+4. No model core files modified
+
+**Migration Validated When:**
+1. Per-class IoU shows learning across multiple classes (not just background)
+2. Visual inspection of predictions shows reasonable structure
+3. Memory usage stable within GPU limits
