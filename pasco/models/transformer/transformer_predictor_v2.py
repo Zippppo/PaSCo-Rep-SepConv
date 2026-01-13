@@ -273,6 +273,11 @@ class TransformerPredictorV2(nn.Module):
                 min_coordinate=torch.IntTensor([*min_Cs[i]]),
             )[0]
             src_C_i = src_C_i.long()
+            # Clamp coordinates to valid range to prevent index out of bounds
+            # This can happen when upsampling generates coordinates slightly outside bounds
+            src_C_i[:, 0] = torch.clamp(src_C_i[:, 0], 0, scene_size[0] - 1)
+            src_C_i[:, 1] = torch.clamp(src_C_i[:, 1], 0, scene_size[1] - 1)
+            src_C_i[:, 2] = torch.clamp(src_C_i[:, 2], 0, scene_size[2] - 1)
             keep_mask_i = keep_mask_dense_downscaled_i[
                 0, :, src_C_i[:, 0], src_C_i[:, 1], src_C_i[:, 2]
             ].T

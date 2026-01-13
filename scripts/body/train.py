@@ -3,15 +3,19 @@
 Training script for body scene completion task.
 
 Usage:
-    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json
+    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json --gpuids 1
 """
 
 import os
+import json
+import csv
+import logging
+from datetime import datetime
 import click
 import torch
 import numpy as np
-from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning import Trainer, Callback
+from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.plugins.environments import SLURMEnvironment
@@ -20,6 +24,134 @@ from pasco.data.body.body_dm import BodyDataModule
 from pasco.data.body.params import class_names, class_frequencies, thing_ids, n_classes
 from pasco.models.net_panoptic_sparse import Net
 from pasco.utils.torch_util import set_random_seed
+
+
+class MetricsLogger(Callback):
+    """Custom callback to log metrics to console and file in readable format."""
+
+    def __init__(self, log_dir, exp_name, n_infers=1):
+        super().__init__()
+        self.log_dir = log_dir
+        self.exp_name = exp_name
+        self.n_infers = n_infers
+
+        # Create metrics log file
+        self.metrics_file = os.path.join(log_dir, exp_name, "metrics.csv")
+        self.readable_log_file = os.path.join(log_dir, exp_name, "training_log.txt")
+
+        os.makedirs(os.path.join(log_dir, exp_name), exist_ok=True)
+
+        # Initialize CSV file with headers
+        self.csv_initialized = False
+
+        # Write header to readable log
+        with open(self.readable_log_file, 'w') as f:
+            f.write(f"{'='*80}\n")
+            f.write(f"Training Log - {exp_name}\n")
+            f.write(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"{'='*80}\n\n")
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        """Log training metrics at end of each epoch."""
+        epoch = trainer.current_epoch
+        metrics = trainer.callback_metrics
+
+        # Extract key training metrics
+        train_metrics = {}
+        for key, value in metrics.items():
+            if key.startswith('train/'):
+                train_metrics[key] = value.item() if torch.is_tensor(value) else value
+
+        if train_metrics:
+            self._log_to_console_and_file(epoch, "train", train_metrics)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        """Log validation metrics at end of each validation epoch."""
+        epoch = trainer.current_epoch
+        metrics = trainer.callback_metrics
+
+        # Extract key validation metrics
+        val_metrics = {}
+        for key, value in metrics.items():
+            if key.startswith('val_'):
+                val_metrics[key] = value.item() if torch.is_tensor(value) else value
+
+        if val_metrics:
+            self._log_to_console_and_file(epoch, "val", val_metrics)
+            self._write_to_csv(epoch, metrics)
+
+    def _log_to_console_and_file(self, epoch, phase, metrics):
+        """Log metrics to both console and readable file."""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Build log message
+        lines = []
+        lines.append(f"\n[{timestamp}] Epoch {epoch} - {phase.upper()} Metrics:")
+        lines.append("-" * 60)
+
+        # Group and sort metrics for better readability
+        loss_metrics = {}
+        iou_metrics = {}
+        pq_metrics = {}
+        other_metrics = {}
+
+        for key, value in sorted(metrics.items()):
+            if 'loss' in key.lower():
+                loss_metrics[key] = value
+            elif 'iou' in key.lower():
+                iou_metrics[key] = value
+            elif 'pq' in key.lower() or 'sq' in key.lower() or 'rq' in key.lower():
+                pq_metrics[key] = value
+            else:
+                other_metrics[key] = value
+
+        # Print losses
+        if loss_metrics:
+            lines.append("  Losses:")
+            for key, value in loss_metrics.items():
+                lines.append(f"    {key}: {value:.6f}")
+
+        # Print IoU metrics
+        if iou_metrics:
+            lines.append("  IoU Metrics:")
+            for key, value in iou_metrics.items():
+                if 'SemIoU' not in key:  # Skip per-class IoU for console
+                    lines.append(f"    {key}: {value:.4f}")
+
+        # Print PQ metrics
+        if pq_metrics:
+            lines.append("  Panoptic Quality:")
+            for key, value in pq_metrics.items():
+                lines.append(f"    {key}: {value:.4f}")
+
+        log_message = "\n".join(lines)
+
+        # Print to console
+        print(log_message)
+
+        # Write to file
+        with open(self.readable_log_file, 'a') as f:
+            f.write(log_message + "\n")
+
+    def _write_to_csv(self, epoch, metrics):
+        """Write metrics to CSV file."""
+        # Prepare row data
+        row_data = {'epoch': epoch, 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+        for key, value in metrics.items():
+            row_data[key] = value.item() if torch.is_tensor(value) else value
+
+        # Initialize CSV with headers if needed
+        if not self.csv_initialized:
+            with open(self.metrics_file, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=list(row_data.keys()))
+                writer.writeheader()
+            self.csv_initialized = True
+
+        # Append row
+        with open(self.metrics_file, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(row_data.keys()))
+            writer.writerow(row_data)
 
 
 @click.command()
@@ -78,6 +210,29 @@ def main(
 ):
     set_random_seed(seed)
 
+    # Setup logging
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "train_debug.log")
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    # File handler: captures all logs (DEBUG and above)
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+    # Console handler: only INFO and above (skip DEBUG to avoid slowdown)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+    logger = logging.getLogger(__name__)
+
     # Parse GPU IDs
     gpu_list = [int(x.strip()) for x in gpuids.split(',')]
     n_gpus = len(gpu_list)
@@ -94,14 +249,14 @@ def main(
         encoder_dropouts[len(encoder_dropouts) - l - 1] = net_3d_dropout
         decoder_dropouts[l] = net_3d_dropout
 
-    print("log_dir", log_dir)
+    logger.info("log_dir: %s", log_dir)
     exp_name = exp_prefix
     exp_name += f"_bs{bs}_lr{lr}_wd{wd}"
     exp_name += f"_queries{num_queries}_nInfers{n_infers}"
     if not heavy_decoder:
         exp_name += "_noHeavyDecoder"
 
-    print(f"Experiment: {exp_name}")
+    logger.info("Experiment: %s", exp_name)
 
     query_sample_ratio = 1.0
 
@@ -163,17 +318,18 @@ def main(
     )
 
     if check:
-        print("Model initialized successfully!")
-        print(f"  n_classes: {body_n_classes}")
-        print(f"  in_channels: {body_in_channels}")
-        print(f"  scene_size: {body_scene_size}")
-        print(f"  thing_ids: {body_thing_ids}")
+        logger.info("Model initialized successfully!")
+        logger.info("  n_classes: %d", body_n_classes)
+        logger.info("  in_channels: %d", body_in_channels)
+        logger.info("  scene_size: %s", body_scene_size)
+        logger.info("  thing_ids: %s", body_thing_ids)
         return
 
     # Logger and callbacks
     if enable_log:
-        logger = TensorBoardLogger(save_dir=log_dir, name=exp_name, version="")
+        tb_logger = TensorBoardLogger(save_dir=log_dir, name=exp_name, version="")
         lr_monitor = LearningRateMonitor(logging_interval="step")
+        metrics_logger = MetricsLogger(log_dir=log_dir, exp_name=exp_name, n_infers=n_infers)
         checkpoint_callbacks = [
             ModelCheckpoint(
                 save_last=True,
@@ -183,18 +339,44 @@ def main(
                 filename="{epoch:03d}-{val_subnet" + str(n_infers) + "/pq_dagger_all:.5f}",
             ),
             lr_monitor,
+            metrics_logger,
         ]
     else:
-        logger = False
+        tb_logger = False
         checkpoint_callbacks = False
 
-    # Check for existing checkpoint
+    # Check for existing checkpoint (for resuming training)
     model_path = os.path.join(log_dir, exp_name, "checkpoints/last.ckpt")
 
-    if not os.path.isfile(model_path) and pretrained_model != "":
+    # Load pretrained model weights if specified
+    # This only loads weights, not optimizer state or epoch info
+    if pretrained_model:
         assert os.path.isfile(pretrained_model), f"Pretrained model not found: {pretrained_model}"
-        model = Net.load_from_checkpoint(checkpoint_path=pretrained_model)
-        print(f"Loaded pretrained model from {pretrained_model}")
+        logger.info("Loading pretrained weights from %s", pretrained_model)
+        checkpoint = torch.load(pretrained_model, map_location='cpu')
+        state_dict = checkpoint.get('state_dict', checkpoint)
+        # Load weights with strict=False to allow partial loading
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            logger.warning("Missing keys when loading pretrained model: %s", missing_keys)
+        if unexpected_keys:
+            logger.warning("Unexpected keys when loading pretrained model: %s", unexpected_keys)
+        logger.info("Successfully loaded pretrained weights")
+
+    # Log training configuration to file
+    config_file = os.path.join(log_dir, exp_name, "config.json")
+    os.makedirs(os.path.join(log_dir, exp_name), exist_ok=True)
+    config = {
+        'lr': lr, 'wd': wd, 'bs': bs, 'scale': scale, 'alpha': alpha,
+        'n_infers': n_infers, 'num_queries': num_queries, 'max_epochs': max_epochs,
+        'transformer_dropout': transformer_dropout, 'net_3d_dropout': net_3d_dropout,
+        'mask_weight': mask_weight, 'occ_weight': occ_weight,
+        'pretrained_model': pretrained_model, 'seed': seed,
+        'dataset_root': dataset_root, 'split_file': split_file,
+    }
+    with open(config_file, 'w') as f:
+        json.dump(config, f, indent=2)
+    logger.info("Saved config to %s", config_file)
 
     # Trainer configuration
     trainer_kwargs = dict(
@@ -202,7 +384,7 @@ def main(
         callbacks=checkpoint_callbacks,
         max_epochs=max_epochs,
         gradient_clip_val=0.5,
-        logger=logger,
+        logger=tb_logger,
         check_val_every_n_epoch=1,
         accelerator="gpu",
         devices=gpu_list,
@@ -216,10 +398,10 @@ def main(
         trainer_kwargs["limit_val_batches"] = 0.25 * accum_batch * n_gpus
         trainer_kwargs["limit_train_batches"] = 0.25 * accum_batch * n_gpus
 
-    # Resume checkpoint path (if exists)
+    # Resume checkpoint path (if exists) - this resumes full training state
     ckpt_path = model_path if os.path.isfile(model_path) else None
     if ckpt_path:
-        print(f"Will resume from {ckpt_path}")
+        logger.info("Will resume training from %s", ckpt_path)
 
     trainer = Trainer(**trainer_kwargs)
     trainer.fit(model, data_module, ckpt_path=ckpt_path)

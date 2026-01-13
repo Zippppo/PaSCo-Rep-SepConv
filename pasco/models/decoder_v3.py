@@ -22,6 +22,7 @@
 # Networks", CVPR'19 (https://arxiv.org/abs/1904.08755) if you use any part
 # of the code.
 from time import time
+import logging
 from pasco.models.metrics import SSCMetrics
 
 # Must be imported before large libs
@@ -41,6 +42,9 @@ from pasco.maskpls.mink import (
 )
 from collections import defaultdict
 from pasco.models.utils import batch_sparse_tensor
+
+# Setup logger for this module
+logger = logging.getLogger(__name__)
 
 
 class TransformerInFeat(nn.Module):
@@ -301,12 +305,9 @@ class DecoderGenerativeSepConvV2(nn.Module):
             keep = torch.zeros_like(max_occ_probs).bool()
             keep[top_voxels_indices] = True
 
-            print(
-                "Scale {}".format(scale),
-                "keep before is ",
-                keep_before,
-                "keep after is ",
-                keep.sum(),
+            logger.debug(
+                "Scale %d keep_before=%d keep_after=%d",
+                scale, keep_before.item(), keep.sum().item()
             )
 
         return keep
@@ -364,11 +365,10 @@ class DecoderGenerativeSepConvV2(nn.Module):
 
                     keep[top_voxels_indices] = True
 
-                    print(
-                        "Scale {}, infer {}: ".format(scale, i_infer),
-                        keep_before,
-                        keep.sum(),
-                        ((sem_label != 0) & (sem_label != 255)).sum(),
+                    logger.debug(
+                        "Scale %d, infer %d: keep_before=%d keep_after=%d gt_nonzero=%d",
+                        scale, i_infer, keep_before.item(), keep.sum().item(),
+                        ((sem_label != 0) & (sem_label != 255)).sum().item()
                     )
 
             keeps.append(keep)
@@ -376,15 +376,25 @@ class DecoderGenerativeSepConvV2(nn.Module):
         keep = keeps > 0
         n_keep_voxels = keep.sum()
         thres = self.agg_occ_thres[scale]
-        
-        if self.n_infers >= 3 and ((n_keep_voxels <= 2) or (n_keep_voxels > thres)):
+
+        # Safety check: ensure at least MIN_VOXELS are kept to avoid empty SparseTensor
+        # This prevents MinkowskiEngine from crashing with segfault
+        MIN_VOXELS = 100
+        if n_keep_voxels < MIN_VOXELS:
+            logger.warning("Too few voxels (%d) at scale %d, selecting top %d", n_keep_voxels, scale, MIN_VOXELS)
+            # Select top voxels by probability
+            k = min(MIN_VOXELS, keeps.shape[0])
+            top_voxels_indices = torch.topk(keeps.float(), k=k, dim=0)[1]
+            keep = torch.zeros_like(keep).bool()
+            keep[top_voxels_indices] = True
+        elif self.n_infers >= 3 and n_keep_voxels > thres:
             if not test and self.n_infers > 2:
                 top_voxels_indices = torch.topk(keeps, k=thres, dim=0)[
                     1
                 ]  # avoid OOM error
                 keep = torch.zeros_like(keep).bool()
                 keep[top_voxels_indices] = True
-                print("Overall keep", n_keep_voxels, "after", keep.sum())
+                logger.debug("Overall keep %d after %d", n_keep_voxels, keep.sum().item())
 
         return keep
 
@@ -410,23 +420,54 @@ class DecoderGenerativeSepConvV2(nn.Module):
                 if keep.sum() == 0:  # keep some voxels to avoid error
                     keep = torch.zeros_like(keep).bool()
                     keep[:1000] = True
-                    print("line 367: keep.sum() == 0")
+                    logger.warning("keep.sum()==0 at scale %d infer %d, using fallback", scale, i_infer)
 
                 if scale == 1:
                     sem_logits_pruned = self.pruning(sem_logits, keep)
                     sem_logits_pruned = prune_outside_coords(
                         sem_logits_pruned, min_C, max_C
                     )
+                    # Safety check for sem_logits_pruned
+                    if sem_logits_pruned.shape[0] == 0:
+                        logger.warning("Empty sem_logits_pruned at scale %d, infer %d", scale, i_infer)
+                        center_coord = ((min_C + max_C) // 2).int()
+                        fallback_coord = torch.tensor([[0, center_coord[0], center_coord[1], center_coord[2]]],
+                                                      device=sem_logits.device, dtype=torch.int32)
+                        fallback_feat = torch.zeros((1, sem_logits.shape[1]), device=sem_logits.device, dtype=sem_logits.F.dtype)
+                        sem_logits_pruned = ME.SparseTensor(
+                            features=fallback_feat,
+                            coordinates=fallback_coord,
+                            tensor_stride=sem_logits_pruned.tensor_stride,
+                            coordinate_manager=sem_logits.coordinate_manager,
+                        )
                     sem_logits_pruneds.append(sem_logits_pruned)
                 try:
                     x_infer_pruned = self.pruning(x, keep)
                 except:
-                    print("Pruning error in decoder", scale, x.shape, keep.shape)
+                    logger.error("Pruning error in decoder scale=%d x.shape=%s keep.shape=%s", scale, x.shape, keep.shape)
                     keep = torch.zeros_like(x.C[:, 0]).bool()
                     keep[:1000] = True
                     x_infer_pruned = self.pruning(x, keep)
 
                 x_infer_pruned = prune_outside_coords(x_infer_pruned, min_C, max_C)
+
+                # Safety check: ensure SparseTensor is not empty after pruning
+                # Empty SparseTensors cause MinkowskiEngine to crash (segfault)
+                if x_infer_pruned.shape[0] == 0:
+                    logger.warning("Empty SparseTensor after prune_outside_coords at scale %d, infer %d", scale, i_infer)
+                    # Create a minimal SparseTensor with at least one voxel within bounds
+                    # Use the center of the bounding box as the fallback coordinate
+                    center_coord = ((min_C + max_C) // 2).int()
+                    fallback_coord = torch.tensor([[0, center_coord[0], center_coord[1], center_coord[2]]],
+                                                  device=x.device, dtype=torch.int32)
+                    fallback_feat = torch.zeros((1, x.shape[1]), device=x.device, dtype=x.F.dtype)
+                    x_infer_pruned = ME.SparseTensor(
+                        features=fallback_feat,
+                        coordinates=fallback_coord,
+                        tensor_stride=x_infer_pruned.tensor_stride,
+                        coordinate_manager=x.coordinate_manager,
+                    )
+
                 x_infer_pruned = self.voxel_feats[layer_name](x_infer_pruned)
                 xs_infers[scale].append(x_infer_pruned)
 

@@ -126,6 +126,7 @@ class Net(pl.LightningModule):
             n_infers=n_infers,
             query_sample_ratio=query_sample_ratio,
             in_channels=[f * 4, f * 2, f],
+            num_classes=n_classes,
         )
 
         self.unet3d = UNet3DV2(

@@ -3,7 +3,7 @@ Training script for PTv3 encoder self-supervised pretraining.
 
 Usage:
     python pretrain.py
-    python pretrain.py --epochs 200 --batch_size 16
+    python body-pretrained-encoder/pretrain.py --epochs 200 --batch_size 16
 """
 
 import os
