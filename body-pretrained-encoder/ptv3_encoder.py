@@ -90,8 +90,13 @@ class PTv3EncoderWrapper(nn.Module):
         """Load pretrained encoder weights."""
         model = cls(**kwargs)
         state_dict = torch.load(checkpoint_path, map_location='cpu')
+        # Handle various checkpoint formats
         if 'encoder' in state_dict:
             state_dict = state_dict['encoder']
+        elif 'model' in state_dict:
+            state_dict = state_dict['model']
+        elif 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
         model.load_state_dict(state_dict)
         return model
 

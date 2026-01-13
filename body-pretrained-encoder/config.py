@@ -3,15 +3,15 @@ Configuration for PTv3 encoder pretraining on body point clouds.
 """
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Optional
 
 
 @dataclass
 class PretrainConfig:
     # Data
     data_root: str = "Dataset/voxel_data"
+    split_file: Optional[str] = None  # Path to dataset_split.json (auto-detected if None)
     num_points: int = 8192
-    train_ratio: float = 0.8
 
     # PTv3 Encoder
     in_channels: int = 6  # xyz + normalized_xyz

@@ -3,26 +3,31 @@ Dataset for self-supervised pretraining on body point clouds.
 """
 
 import os
+import json
 import glob
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from typing import List, Tuple, Optional
 
-from utils import normalize_point_cloud, random_rotate, random_scale, random_jitter
+try:
+    from .utils import normalize_point_cloud, random_rotate, random_scale, random_jitter
+except ImportError:
+    from utils import normalize_point_cloud, random_rotate, random_scale, random_jitter
 
 
 class BodyPretrainDataset(Dataset):
     """
     Dataset for loading body surface point clouds for self-supervised pretraining.
+    Uses dataset_split.json for train/val/test splits.
     """
 
     def __init__(
         self,
         data_root: str,
         split: str = 'train',
+        split_file: str = None,
         num_points: int = 8192,
-        train_ratio: float = 0.8,
         augment: bool = True,
         rotate: bool = True,
         jitter: float = 0.01,
@@ -31,9 +36,9 @@ class BodyPretrainDataset(Dataset):
         """
         Args:
             data_root: Path to voxel_data directory
-            split: 'train' or 'val'
+            split: 'train', 'val', or 'test'
+            split_file: Path to dataset_split.json (if None, looks in project root)
             num_points: Number of points to sample per cloud
-            train_ratio: Ratio of samples for training
             augment: Whether to apply augmentation
             rotate: Apply random rotation
             jitter: Jitter noise std
@@ -49,22 +54,51 @@ class BodyPretrainDataset(Dataset):
         self.jitter = jitter
         self.scale_range = scale_range
 
-        # Get all npz files
-        all_files = sorted(glob.glob(os.path.join(data_root, '*.npz')))
-        if len(all_files) == 0:
-            raise ValueError(f"No npz files found in {data_root}")
+        # Load split file
+        if split_file is None:
+            # Look for dataset_split.json in project root
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            split_file = os.path.join(project_root, 'dataset_split.json')
 
-        # Split train/val
-        np.random.seed(42)
-        indices = np.random.permutation(len(all_files))
-        split_idx = int(len(all_files) * train_ratio)
+        if os.path.exists(split_file):
+            with open(split_file, 'r') as f:
+                split_data = json.load(f)
 
-        if split == 'train':
-            self.files = [all_files[i] for i in indices[:split_idx]]
+            sample_ids = split_data['splits'].get(split, [])
+            if len(sample_ids) == 0:
+                raise ValueError(f"No samples found for split '{split}' in {split_file}")
+
+            # Build file paths from sample IDs
+            self.files = []
+            for sample_id in sample_ids:
+                file_path = os.path.join(data_root, f'{sample_id}.npz')
+                if os.path.exists(file_path):
+                    self.files.append(file_path)
+
+            if len(self.files) == 0:
+                raise ValueError(f"No npz files found in {data_root} for split '{split}'")
+
+            print(f"[{split}] Loaded {len(self.files)} samples from {split_file}")
         else:
-            self.files = [all_files[i] for i in indices[split_idx:]]
+            # Fallback: use all files with random split (legacy behavior)
+            print(f"Warning: {split_file} not found, falling back to random split")
+            all_files = sorted(glob.glob(os.path.join(data_root, '*.npz')))
+            if len(all_files) == 0:
+                raise ValueError(f"No npz files found in {data_root}")
 
-        print(f"[{split}] Loaded {len(self.files)} samples from {data_root}")
+            np.random.seed(42)
+            indices = np.random.permutation(len(all_files))
+            train_end = int(len(all_files) * 0.8)
+            val_end = int(len(all_files) * 0.9)
+
+            if split == 'train':
+                self.files = [all_files[i] for i in indices[:train_end]]
+            elif split == 'val':
+                self.files = [all_files[i] for i in indices[train_end:val_end]]
+            else:  # test
+                self.files = [all_files[i] for i in indices[val_end:]]
+
+            print(f"[{split}] Loaded {len(self.files)} samples (random split)")
 
     def __len__(self) -> int:
         return len(self.files)
@@ -132,7 +166,7 @@ def collate_fn(batch: List[dict]) -> dict:
     # Stack
     coord = torch.cat(coords, dim=0)
     feat = torch.cat(feats, dim=0)
-    offset = torch.cumsum(torch.tensor(offset), dim=0)
+    offset = torch.cumsum(torch.tensor(offset, dtype=torch.long), dim=0)
 
     return {
         'coord': coord,
@@ -147,8 +181,8 @@ def build_dataloaders(config) -> Tuple[DataLoader, DataLoader]:
     train_dataset = BodyPretrainDataset(
         data_root=config.data_root,
         split='train',
+        split_file=getattr(config, 'split_file', None),
         num_points=config.num_points,
-        train_ratio=config.train_ratio,
         augment=True,
         rotate=config.rotate,
         jitter=config.jitter,
@@ -158,8 +192,8 @@ def build_dataloaders(config) -> Tuple[DataLoader, DataLoader]:
     val_dataset = BodyPretrainDataset(
         data_root=config.data_root,
         split='val',
+        split_file=getattr(config, 'split_file', None),
         num_points=config.num_points,
-        train_ratio=config.train_ratio,
         augment=False,
     )
 

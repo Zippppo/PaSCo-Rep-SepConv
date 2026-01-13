@@ -83,7 +83,7 @@ class DecoderBlock(nn.Module):
         dropout_layer,
         scene_size,
         voxel_size=0.2,
-        drop_path_rates=[0.0, 0.0, 0.0],
+        drop_path_rates=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         n_heads=2,
         compl_head_dim=1,
         heavy_decoder=True,
@@ -255,11 +255,6 @@ class DecoderGenerativeSepConvV2(nn.Module):
                 ),
             )
 
-            if scale in [1]:
-
-                for i_infer in range(self.n_infers):
-                    layer_name = "scale{}_infer{}".format(scale, i_infer)
-
             if scale in [1, 2, 4]:
                 for i_infer in range(self.n_infers):
                     layer_name = "scale{}_infer{}".format(scale, i_infer)
@@ -285,7 +280,7 @@ class DecoderGenerativeSepConvV2(nn.Module):
         self.pruning = ME.MinkowskiPruning()
         self.sigmoid_sparse = ME.MinkowskiSigmoid()
         self.threshold = 0
-        self.n_classes = 20
+        self.n_classes = n_classes  # Use parameter, not hardcoded
 
     def predict_completion(
         self, x, scale, occ_logits, scene_size, global_min_coords, geo_labels=None

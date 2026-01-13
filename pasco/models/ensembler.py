@@ -47,7 +47,7 @@ class Ensembler(nn.Module):
                 min_coords=min_C,
             )
 
-            from_scene_size = (256, 256, 32)
+            from_scene_size = (128, 128, 256)
             from_probs, from_coords = sample_scene(
                 min_C, T, voxel_prob_subnet_dense, from_scene_size
             )
@@ -145,7 +145,7 @@ class Ensembler(nn.Module):
             occ_probs_1_dense = to_dense_tensor(
                 occ_probs_1.F, occ_probs_1.C, scene_size=scene_size, min_coords=min_C
             )
-            from_scene_size = (256, 256, 32)
+            from_scene_size = (128, 128, 256)
             from_probs, from_coords = sample_scene(
                 min_C, T, occ_probs_1_dense, from_scene_size
             )
@@ -171,7 +171,7 @@ class Ensembler(nn.Module):
             sem_probs_1_dense = to_dense_tensor(
                 sem_probs_1, sem_logits_1.C, scene_size=scene_size, min_coords=min_C
             )
-            from_scene_size = (256, 256, 32)
+            from_scene_size = (128, 128, 256)
             from_probs, from_coords = sample_scene(
                 min_C, T, sem_probs_1_dense, from_scene_size
             )

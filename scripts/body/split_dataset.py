@@ -10,7 +10,7 @@ import glob
 import argparse
 import numpy as np
 
-RANDOM_SEED = 42
+RANDOM_SEED = 34  # Default seed for reproducibility
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_DATA_DIR = os.path.join(PROJECT_ROOT, "voxel-output", "merged_data")
 DEFAULT_OUTPUT = os.path.join(PROJECT_ROOT, "dataset_split.json")
@@ -73,13 +73,13 @@ def load_split(split_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create dataset split for LOOC")
-    parser.add_argument('--data_dir', type=str, default=DEFAULT_DATA_DIR,
+    parser.add_argument('--data_dir', type=str, default="Dataset/voxel_data",
                         help='Path to data directory containing .npz files')
     parser.add_argument('--output', type=str, default=DEFAULT_OUTPUT,
                         help='Output JSON file path')
     parser.add_argument('--train_ratio', type=float, default=0.8)
     parser.add_argument('--val_ratio', type=float, default=0.1)
-    parser.add_argument('--seed', type=int, default=RANDOM_SEED)
+    parser.add_argument('--seed', type=int, default=34)
     args = parser.parse_args()
 
     create_split(args.data_dir, args.output, args.train_ratio, args.val_ratio, args.seed)

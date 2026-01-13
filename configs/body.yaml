@@ -1,0 +1,37 @@
+# Body Scene Completion Configuration
+# Adapted from PaSCo for human body organ segmentation
+
+dataset: body
+n_classes: 72
+scene_size: [128, 128, 256]  # [D, H, W] in voxels
+in_channels: 38  # xyz(3) + xyz_rel(3) + pos_enc(32)
+n_infers: 1  # MVP - single inference
+num_queries: 100
+voxel_size: 4  # mm
+thing_ids: []  # no instance segmentation, semantic only
+
+# Training parameters
+lr: 0.0003
+weight_decay: 0.0
+batch_size: 1
+max_epochs: 60
+
+# Model architecture
+f: 64  # base feature dimension
+transformer_dropout: 0.2
+net_3d_dropout: 0.0
+heavy_decoder: false
+use_se_layer: false
+
+# Loss weights
+mask_weight: 40.0
+occ_weight: 1.0
+alpha: 0.0  # uncertainty weight
+
+# Transformer
+transformer_enc_layers: 0
+transformer_dec_layers: 1
+
+# Data
+data_aug: false  # no augmentation for body task
+point_dropout_ratio: 0.0

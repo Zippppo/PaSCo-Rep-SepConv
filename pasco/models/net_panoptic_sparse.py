@@ -17,7 +17,7 @@ from pasco.loss.panoptic_quality import (
     convert_mask_label_to_panoptic_output,
     find_matched_segment,
 )
-from pasco.data.semantic_kitti.params import thing_ids
+from pasco.data.semantic_kitti.params import thing_ids as kitti_thing_ids
 
 from pasco.models.unet3d_sparse_v2 import UNet3DV2, CylinderFeat
 
@@ -71,6 +71,9 @@ class Net(pl.LightningModule):
         iou_threshold=0.2,
         use_voxel_query_loss=True,
         heavy_decoder=True,
+        scene_size=None,
+        thing_ids=None,
+        max_steps=50000,  # Maximum steps for lr scheduler
     ):
         super().__init__()
         self.n_infers = n_infers
@@ -81,11 +84,16 @@ class Net(pl.LightningModule):
         self.class_names = class_names
         self.object_mask_threshold = object_mask_threshold
         self.overlap_threshold = overlap_threshold
-        self.scene_size = (256 // scale, 256 // scale, 32 // scale)
+        # scene_size: configurable for different datasets (KITTI: [256,256,32], Body: [128,128,256])
+        if scene_size is not None:
+            self.scene_size = tuple(s // scale for s in scene_size)
+        else:
+            self.scene_size = (256 // scale, 256 // scale, 32 // scale)  # KITTI default
         self.class_weights = class_weights
         self.compl_labelweights = compl_labelweights
         self.class_frequencies = class_frequencies
         self.iou_threshold = iou_threshold
+        self.max_steps = max_steps
         self.augmenter = Augmenter()
         # log hyperparameters
         self.save_hyperparameters()
@@ -177,7 +185,11 @@ class Net(pl.LightningModule):
             compl_labelweights=compl_labelweights,
         )
 
-        self.thing_ids = thing_ids
+        # thing_ids: configurable for different datasets (KITTI: [1-8], Body: [])
+        if thing_ids is not None:
+            self.thing_ids = thing_ids
+        else:
+            self.thing_ids = kitti_thing_ids  # KITTI default
 
         self.sync_dist = True
         self.pq_stat = {}
@@ -593,7 +605,8 @@ class Net(pl.LightningModule):
             query_probs = panop_prob_predictions[i_infer]["query_probs"]
             voxel_probs = panop_prob_predictions[i_infer]["voxel_probs"]
 
-            scene_size = (256, 256, 32)
+            # Use configured scene_size (scaled back to original dimensions)
+            scene_size = tuple(s * self.scale for s in self.scene_size)
             min_C = torch.tensor([0, 0, 0], dtype=torch.int32)
 
             panop_out = panoptic_inference(
@@ -893,8 +906,8 @@ class Net(pl.LightningModule):
             optimizer,
             WarmupCosine(
                 0,
-                50000,  # config["scheduler"]["max_epoch"] * len_train_loader,
-                0.01,  # config["scheduler"]["min_lr"] / config["optim"]["lr"],
+                self.max_steps,  # Configurable max steps for scheduler
+                0.01,  # min_lr / lr ratio
             ),
         )
 
