@@ -166,12 +166,13 @@ def normalize_point_cloud(points: torch.Tensor) -> Tuple[torch.Tensor, torch.Ten
 def random_rotate(points: torch.Tensor) -> torch.Tensor:
     """Apply random rotation around z-axis."""
     angle = torch.rand(1, device=points.device) * 2 * 3.14159
-    cos_a, sin_a = torch.cos(angle), torch.sin(angle)
+    cos_a = torch.cos(angle).item()
+    sin_a = torch.sin(angle).item()
     rotation = torch.tensor([
         [cos_a, -sin_a, 0],
         [sin_a, cos_a, 0],
         [0, 0, 1]
-    ], device=points.device, dtype=points.dtype).squeeze()
+    ], device=points.device, dtype=points.dtype)
     return points @ rotation.T
 
 

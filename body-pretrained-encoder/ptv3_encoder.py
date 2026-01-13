@@ -19,6 +19,8 @@ class PTv3EncoderWrapper(nn.Module):
     """
     Wrapper for PointTransformerV3 encoder.
     Outputs point-level features (N, D).
+
+    Note: With cls_mode=False, returns features at original resolution.
     """
 
     def __init__(
@@ -28,15 +30,19 @@ class PTv3EncoderWrapper(nn.Module):
         enc_channels: Tuple[int, ...] = (32, 64, 128, 256, 512),
         enc_num_head: Tuple[int, ...] = (2, 4, 8, 16, 32),
         enc_patch_size: Tuple[int, ...] = (1024, 1024, 1024, 1024, 1024),
+        dec_depths: Tuple[int, ...] = (2, 2, 2, 2),
+        dec_channels: Tuple[int, ...] = (64, 64, 128, 256),
+        dec_num_head: Tuple[int, ...] = (4, 4, 8, 16),
+        dec_patch_size: Tuple[int, ...] = (1024, 1024, 1024, 1024),
         grid_size: float = 4.0,
         order: Tuple[str, ...] = ("z", "z-trans", "hilbert", "hilbert-trans"),
         enable_flash: bool = False,  # Set False for compatibility
     ):
         super().__init__()
         self.grid_size = grid_size
-        self.out_channels = enc_channels[-1]
+        self.out_channels = dec_channels[0]  # Output at decoder's first stage
 
-        # Initialize PTv3 in cls_mode (encoder only)
+        # Initialize PTv3 with decoder (cls_mode=False) to get full resolution output
         self.ptv3 = PointTransformerV3(
             in_channels=in_channels,
             order=order,
@@ -45,7 +51,11 @@ class PTv3EncoderWrapper(nn.Module):
             enc_channels=enc_channels,
             enc_num_head=enc_num_head,
             enc_patch_size=enc_patch_size,
-            cls_mode=True,  # Only use encoder
+            dec_depths=dec_depths,
+            dec_channels=dec_channels,
+            dec_num_head=dec_num_head,
+            dec_patch_size=dec_patch_size,
+            cls_mode=False,  # Use encoder + decoder for full resolution
             enable_flash=enable_flash,
             pdnorm_bn=False,
             pdnorm_ln=False,
@@ -61,8 +71,8 @@ class PTv3EncoderWrapper(nn.Module):
             offset: (B,) batch offsets
 
         Returns:
-            encoded_feat: (N', D) encoded features (may have different N due to pooling)
-            encoded_coord: (N', 3) corresponding coordinates
+            encoded_feat: (N, D) encoded features at original resolution
+            encoded_coord: (N, 3) corresponding coordinates
         """
         data_dict = {
             "coord": coord,
@@ -255,6 +265,10 @@ def build_mae_model(config) -> MaskedAutoEncoder:
         'enc_channels': config.enc_channels,
         'enc_num_head': config.enc_num_head,
         'enc_patch_size': config.enc_patch_size,
+        'dec_depths': config.dec_depths,
+        'dec_channels': config.dec_channels,
+        'dec_num_head': config.dec_num_head,
+        'dec_patch_size': config.dec_patch_size,
         'grid_size': config.grid_size,
         'order': config.order,
     }
@@ -263,5 +277,5 @@ def build_mae_model(config) -> MaskedAutoEncoder:
         encoder_cfg=encoder_cfg,
         mask_ratio=config.mask_ratio,
         mask_group_size=config.mask_group_size,
-        decoder_dims=config.decoder_dims[:-1],  # Exclude final 3
+        decoder_dims=config.mae_decoder_hidden_dims,
     )

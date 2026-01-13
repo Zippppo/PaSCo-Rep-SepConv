@@ -19,6 +19,13 @@ class PretrainConfig:
     enc_channels: Tuple[int, ...] = (32, 64, 128, 256, 512)
     enc_num_head: Tuple[int, ...] = (2, 4, 8, 16, 32)
     enc_patch_size: Tuple[int, ...] = (1024, 1024, 1024, 1024, 1024)
+
+    # PTv3 Decoder (for full resolution feature output)
+    dec_depths: Tuple[int, ...] = (2, 2, 2, 2)
+    dec_channels: Tuple[int, ...] = (64, 64, 128, 256)
+    dec_num_head: Tuple[int, ...] = (4, 4, 8, 16)
+    dec_patch_size: Tuple[int, ...] = (1024, 1024, 1024, 1024)
+
     grid_size: float = 4.0  # mm, match voxel resolution
     order: Tuple[str, ...] = ("z", "z-trans", "hilbert", "hilbert-trans")
 
@@ -26,8 +33,8 @@ class PretrainConfig:
     mask_ratio: float = 0.6
     mask_group_size: int = 32
 
-    # Decoder
-    decoder_dims: Tuple[int, ...] = (512, 256, 128, 3)
+    # MAE Decoder (MLP for coordinate prediction)
+    mae_decoder_hidden_dims: Tuple[int, ...] = (256, 128)
 
     # Training
     batch_size: int = 8
@@ -35,6 +42,7 @@ class PretrainConfig:
     weight_decay: float = 0.05
     epochs: int = 100
     warmup_epochs: int = 10
+    grad_clip_norm: float = 1.0  # Gradient clipping max norm
 
     # Augmentation
     rotate: bool = True
@@ -47,6 +55,7 @@ class PretrainConfig:
     checkpoint_dir: str = "body-pretrained-encoder/checkpoints"
     log_interval: int = 50
     save_interval: int = 10
+    use_amp: bool = True  # Use automatic mixed precision
 
 
 config = PretrainConfig()

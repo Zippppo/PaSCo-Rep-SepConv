@@ -1,2 +1,9 @@
-- PaSCo简介：一个自动驾驶领域的场景补全方法，架构上创新有(i) Mask-centric Transformer架构 (ii) 使用语义预测进行裁剪。这样更好地平衡小类别的性能 (iii) 使用MIMO策略，通过训练共享权重的子网络来估计体素级和实例级的不确定性。
-- 新任务简介：人体场景补全任务，拥有的数据是（部分体表的点云）+（整个人体体素表示，包含类别）。目标是，输入体表点云，预测补全出整个人体。
+## Project Overview
+- **PaSCo**: A scene completion method for autonomous driving with key innovations: (i) Mask-centric Transformer architecture (ii) Semantic prediction-based cropping for better small-class performance (iii) MIMO strategy using shared-weight sub-networks for voxel-level and instance-level uncertainty estimation.
+- **New Task(Pasco-Body)**: Human body scene completion. Input: partial body surface point cloud. Output: complete human body voxel representation with semantic labels.
+
+## Testing Strategy (TDD)
+- **Core utilities**: Strict TDD (coordinate transforms, IoU computation, etc.)
+- **Data loading/preprocessing**: Test data shape, type, and value ranges
+- **Model code**: Smoke tests (verify forward pass, output shapes)
+- **Exploratory code**: Tests optional, focus on reproducibility

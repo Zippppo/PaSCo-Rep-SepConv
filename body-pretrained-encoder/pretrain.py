@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.cuda.amp import GradScaler, autocast
 
 from config import config
 from pretrain_dataset import build_dataloaders
@@ -30,8 +31,11 @@ def train_one_epoch(
     model: nn.Module,
     train_loader,
     optimizer,
+    scaler: GradScaler,
     epoch: int,
     device: str,
+    use_amp: bool = True,
+    grad_clip_norm: float = 1.0,
     log_interval: int = 50,
 ) -> float:
     """Train for one epoch."""
@@ -46,15 +50,21 @@ def train_one_epoch(
 
         optimizer.zero_grad()
 
-        # Forward
-        outputs = model(coord, feat, offset)
+        # Forward with automatic mixed precision
+        with autocast(enabled=use_amp):
+            outputs = model(coord, feat, offset)
+            loss = reconstruction_loss(outputs['pred_coords'], outputs['target_coords'])
 
-        # Loss
-        loss = reconstruction_loss(outputs['pred_coords'], outputs['target_coords'])
+        # Backward with gradient scaling
+        scaler.scale(loss).backward()
 
-        # Backward
-        loss.backward()
-        optimizer.step()
+        # Gradient clipping (unscale first for proper clipping)
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+
+        # Optimizer step with scaler
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item()
         num_batches += 1
@@ -66,7 +76,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def validate(model: nn.Module, val_loader, device: str) -> float:
+def validate(model: nn.Module, val_loader, device: str, use_amp: bool = True) -> float:
     """Validate model."""
     model.eval()
     total_loss = 0.0
@@ -77,8 +87,9 @@ def validate(model: nn.Module, val_loader, device: str) -> float:
         feat = batch['feat'].to(device)
         offset = batch['offset'].to(device)
 
-        outputs = model(coord, feat, offset)
-        loss = reconstruction_loss(outputs['pred_coords'], outputs['target_coords'])
+        with autocast(enabled=use_amp):
+            outputs = model(coord, feat, offset)
+            loss = reconstruction_loss(outputs['pred_coords'], outputs['target_coords'])
 
         total_loss += loss.item()
         num_batches += 1
@@ -90,6 +101,7 @@ def save_checkpoint(
     model: nn.Module,
     optimizer,
     scheduler,
+    scaler: GradScaler,
     epoch: int,
     loss: float,
     checkpoint_dir: str,
@@ -104,6 +116,7 @@ def save_checkpoint(
         'encoder': model.get_encoder_state_dict(),
         'optimizer': optimizer.state_dict(),
         'scheduler': scheduler.state_dict(),
+        'scaler': scaler.state_dict(),
         'loss': loss,
     }
 
@@ -128,6 +141,7 @@ def load_checkpoint(
     model: nn.Module,
     optimizer,
     scheduler,
+    scaler: GradScaler,
     checkpoint_path: str,
     device: str,
 ) -> int:
@@ -141,6 +155,8 @@ def load_checkpoint(
     model.load_state_dict(state['model'])
     optimizer.load_state_dict(state['optimizer'])
     scheduler.load_state_dict(state['scheduler'])
+    if 'scaler' in state:
+        scaler.load_state_dict(state['scaler'])
 
     return state['epoch'] + 1
 
@@ -152,6 +168,7 @@ def main():
     parser.add_argument('--lr', type=float, default=None)
     parser.add_argument('--resume', type=str, default=None, help='Checkpoint to resume from')
     parser.add_argument('--device', type=str, default=None)
+    parser.add_argument('--no_amp', action='store_true', help='Disable automatic mixed precision')
     args = parser.parse_args()
 
     # Override config with args
@@ -163,9 +180,12 @@ def main():
         config.lr = args.lr
     if args.device:
         config.device = args.device
+    if args.no_amp:
+        config.use_amp = False
 
     device = config.device if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
+    use_amp = config.use_amp and device != 'cpu'
+    print(f"Using device: {device}, AMP: {use_amp}")
 
     # Build dataloaders
     print("Building dataloaders...")
@@ -205,13 +225,16 @@ def main():
         milestones=[config.warmup_epochs],
     )
 
+    # Gradient scaler for mixed precision
+    scaler = GradScaler(enabled=use_amp)
+
     # Resume
     start_epoch = 0
     if args.resume:
-        start_epoch = load_checkpoint(model, optimizer, scheduler, args.resume, device)
+        start_epoch = load_checkpoint(model, optimizer, scheduler, scaler, args.resume, device)
     elif os.path.exists(os.path.join(config.checkpoint_dir, 'latest.pth')):
         start_epoch = load_checkpoint(
-            model, optimizer, scheduler,
+            model, optimizer, scheduler, scaler,
             os.path.join(config.checkpoint_dir, 'latest.pth'),
             device
         )
@@ -225,11 +248,14 @@ def main():
 
         # Train
         train_loss = train_one_epoch(
-            model, train_loader, optimizer, epoch, device, config.log_interval
+            model, train_loader, optimizer, scaler, epoch, device,
+            use_amp=use_amp,
+            grad_clip_norm=config.grad_clip_norm,
+            log_interval=config.log_interval,
         )
 
         # Validate
-        val_loss = validate(model, val_loader, device)
+        val_loss = validate(model, val_loader, device, use_amp=use_amp)
 
         # Update scheduler
         scheduler.step()
@@ -240,7 +266,7 @@ def main():
             best_val_loss = val_loss
 
         save_checkpoint(
-            model, optimizer, scheduler, epoch, val_loss,
+            model, optimizer, scheduler, scaler, epoch, val_loss,
             config.checkpoint_dir, is_best
         )
 

@@ -86,28 +86,30 @@ class BodyPretrainDataset(Dataset):
 
         points = torch.from_numpy(points)
 
-        # Normalize
+        # Normalize to unit sphere
         normalized, centroid, scale = normalize_point_cloud(points)
 
-        # Augmentation
+        # Apply augmentation (on normalized coordinates)
+        augmented = normalized.clone()
         if self.augment:
             if self.rotate:
-                normalized = random_rotate(normalized)
+                augmented = random_rotate(augmented)
             if self.scale_range[0] != 1.0 or self.scale_range[1] != 1.0:
-                normalized = random_scale(normalized, self.scale_range)
+                augmented = random_scale(augmented, self.scale_range)
             if self.jitter > 0:
-                normalized = random_jitter(normalized, self.jitter)
+                augmented = random_jitter(augmented, self.jitter)
 
-        # Create features: concat xyz with normalized_xyz
-        # Original coords (denormalized for reconstruction target)
-        original_coords = normalized * scale + centroid
-        # Features: xyz + normalized_xyz
-        feat = torch.cat([original_coords, normalized], dim=-1)  # (N, 6)
+        # Denormalize augmented coords for reconstruction target
+        # Note: reconstruction target is in augmented space (consistent with input)
+        coords = augmented * scale + centroid
+
+        # Features: augmented xyz (absolute) + augmented xyz (normalized)
+        feat = torch.cat([coords, augmented], dim=-1)  # (N, 6)
 
         return {
-            'coord': original_coords,  # (N, 3) - for reconstruction target
+            'coord': coords,           # (N, 3) - reconstruction target (augmented space)
             'feat': feat,              # (N, 6) - input features
-            'normalized': normalized,  # (N, 3) - normalized coords
+            'normalized': augmented,   # (N, 3) - normalized augmented coords
             'centroid': centroid,      # (3,)
             'scale': scale,            # scalar
         }
