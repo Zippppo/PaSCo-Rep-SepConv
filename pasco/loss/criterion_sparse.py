@@ -195,6 +195,10 @@ class SetCriterion(nn.Module):
             ssc_logit_sparse_F = ssc_logit_sparse.F[semantic_label_sparse != 255]
             semantic_label_sparse = semantic_label_sparse[semantic_label_sparse != 255]
 
+            # Skip loss computation if tensor is empty after filtering (avoids NaN)
+            if ssc_logit_sparse_F.shape[0] == 0:
+                return ssc_ce_loss, ssc_lovasz_loss
+
             ssc_ce_loss += CE_ssc_loss(
                 ssc_logit_sparse_F, semantic_label_sparse, self.compl_labelweights
             )

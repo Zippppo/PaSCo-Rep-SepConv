@@ -31,6 +31,8 @@ class BodyDataset(Dataset):
         data_aug=False,
         complete_scale=8,
         voxel_size=4.0,
+        use_precomputed=False,
+        precomputed_root=None,
     ):
         """
         Args:
@@ -54,6 +56,13 @@ class BodyDataset(Dataset):
         self.n_classes = n_classes
         self.thing_ids = thing_ids
 
+        # Precomputed labels configuration
+        self.use_precomputed = use_precomputed
+        self.precomputed_root = precomputed_root
+
+        if self.use_precomputed and self.precomputed_root is None:
+            raise ValueError("use_precomputed=True requires precomputed_root to be specified")
+
         # Load split file
         import json
         with open(split_file, 'r') as f:
@@ -70,12 +79,22 @@ class BodyDataset(Dataset):
         for sample_id in self.sample_ids:
             npz_path = os.path.join(root, f"{sample_id}.npz")
             if os.path.exists(npz_path):
-                self.samples.append({
+                sample_dict = {
                     "sample_id": sample_id,
                     "npz_path": npz_path,
-                })
+                }
 
-        print(f"BodyDataset [{split}]: {len(self.samples)} samples")
+                # Add precomputed path if enabled
+                if self.use_precomputed:
+                    precomputed_path = os.path.join(self.precomputed_root, f"{sample_id}.npz")
+                    sample_dict["precomputed_path"] = precomputed_path if os.path.exists(precomputed_path) else None
+                else:
+                    sample_dict["precomputed_path"] = None
+
+                self.samples.append(sample_dict)
+
+        mode_str = "precomputed" if self.use_precomputed else "on-the-fly"
+        print(f"BodyDataset [{split}]: {len(self.samples)} samples (mode: {mode_str})")
 
     def __len__(self):
         return len(self.samples)
@@ -146,8 +165,13 @@ class BodyDataset(Dataset):
         instance_label = torch.zeros_like(semantic_label_tensor)  # No instances
         mask_label = self._prepare_mask_label(semantic_label_tensor)
 
-        # Generate multi-scale labels
-        geo_labels, sem_labels = self._generate_multiscale_labels(semantic_label_tensor)
+        # Generate or load multi-scale labels
+        if self.use_precomputed and sample.get("precomputed_path") is not None:
+            geo_labels, sem_labels = self._load_precomputed_labels(
+                sample["precomputed_path"], semantic_label_tensor
+            )
+        else:
+            geo_labels, sem_labels = self._generate_multiscale_labels(semantic_label_tensor)
 
         ret_data = {
             "xyz": sensor_pc_adjusted,
@@ -390,3 +414,44 @@ class BodyDataset(Dataset):
             sem_labels[f"1_{scale}"] = downscaled_sem.type(torch.uint8)
 
         return geo_labels, sem_labels
+
+    def _load_precomputed_labels(self, precomputed_path, semantic_label_tensor):
+        """
+        Load precomputed multiscale labels from NPZ file with validation and fallback.
+
+        Args:
+            precomputed_path: str, path to precomputed .npz file
+            semantic_label_tensor: torch.Tensor [D, H, W], for validation
+
+        Returns:
+            geo_labels: dict with "1_1", "1_2", "1_4" keys (torch.Tensor)
+            sem_labels: dict with "1_1", "1_2", "1_4" keys (torch.Tensor)
+        """
+        try:
+            data = np.load(precomputed_path)
+
+            # Validate semantic_label matches (ensure correct normalized grid)
+            if not np.array_equal(semantic_label_tensor.numpy(), data['semantic_label']):
+                import warnings
+                warnings.warn(f"semantic_label mismatch in {precomputed_path}, using on-the-fly generation")
+                return self._generate_multiscale_labels(semantic_label_tensor)
+
+            # Construct dictionaries
+            geo_labels = {
+                "1_1": torch.from_numpy(data["geo_1_1"]),
+                "1_2": torch.from_numpy(data["geo_1_2"]),
+                "1_4": torch.from_numpy(data["geo_1_4"]),
+            }
+
+            sem_labels = {
+                "1_1": torch.from_numpy(data["sem_1_1"]),
+                "1_2": torch.from_numpy(data["sem_1_2"]),
+                "1_4": torch.from_numpy(data["sem_1_4"]),
+            }
+
+            return geo_labels, sem_labels
+
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Failed to load {precomputed_path}: {e}. Using on-the-fly generation.")
+            return self._generate_multiscale_labels(semantic_label_tensor)

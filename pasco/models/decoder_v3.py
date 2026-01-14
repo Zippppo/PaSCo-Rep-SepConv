@@ -427,16 +427,22 @@ class DecoderGenerativeSepConvV2(nn.Module):
                     sem_logits_pruned = prune_outside_coords(
                         sem_logits_pruned, min_C, max_C
                     )
-                    # Safety check for sem_logits_pruned
-                    if sem_logits_pruned.shape[0] == 0:
-                        logger.warning("Empty sem_logits_pruned at scale %d, infer %d", scale, i_infer)
+                    # Safety check for sem_logits_pruned - need at least 2 for consistency
+                    MIN_VOXELS_FOR_SEM = 2
+                    if sem_logits_pruned.shape[0] < MIN_VOXELS_FOR_SEM:
+                        logger.warning("Too few sem_logits_pruned (%d) at scale %d, infer %d",
+                                       sem_logits_pruned.shape[0], scale, i_infer)
                         center_coord = ((min_C + max_C) // 2).int()
-                        fallback_coord = torch.tensor([[0, center_coord[0], center_coord[1], center_coord[2]]],
-                                                      device=sem_logits.device, dtype=torch.int32)
-                        fallback_feat = torch.zeros((1, sem_logits.shape[1]), device=sem_logits.device, dtype=sem_logits.F.dtype)
+                        stride = sem_logits_pruned.tensor_stride[0] if sem_logits_pruned.tensor_stride else 1
+                        fallback_coords = torch.tensor([
+                            [0, center_coord[0], center_coord[1], center_coord[2]],
+                            [0, center_coord[0] + stride, center_coord[1], center_coord[2]],
+                        ], device=sem_logits.device, dtype=torch.int32)
+                        fallback_feat = torch.zeros((MIN_VOXELS_FOR_SEM, sem_logits.shape[1]),
+                                                    device=sem_logits.device, dtype=sem_logits.F.dtype)
                         sem_logits_pruned = ME.SparseTensor(
                             features=fallback_feat,
-                            coordinates=fallback_coord,
+                            coordinates=fallback_coords,
                             tensor_stride=sem_logits_pruned.tensor_stride,
                             coordinate_manager=sem_logits.coordinate_manager,
                         )
@@ -451,19 +457,25 @@ class DecoderGenerativeSepConvV2(nn.Module):
 
                 x_infer_pruned = prune_outside_coords(x_infer_pruned, min_C, max_C)
 
-                # Safety check: ensure SparseTensor is not empty after pruning
-                # Empty SparseTensors cause MinkowskiEngine to crash (segfault)
-                if x_infer_pruned.shape[0] == 0:
-                    logger.warning("Empty SparseTensor after prune_outside_coords at scale %d, infer %d", scale, i_infer)
-                    # Create a minimal SparseTensor with at least one voxel within bounds
-                    # Use the center of the bounding box as the fallback coordinate
+                # Safety check: ensure SparseTensor has at least 2 voxels after pruning
+                # BatchNorm requires at least 2 samples to compute statistics
+                # Empty or single-voxel SparseTensors cause BatchNorm to crash
+                MIN_VOXELS_FOR_BN = 2
+                if x_infer_pruned.shape[0] < MIN_VOXELS_FOR_BN:
+                    logger.warning("Too few voxels (%d) after prune_outside_coords at scale %d, infer %d, creating %d fallback voxels",
+                                   x_infer_pruned.shape[0], scale, i_infer, MIN_VOXELS_FOR_BN)
+                    # Create fallback SparseTensor with at least MIN_VOXELS_FOR_BN voxels
+                    # Use the center of the bounding box and a nearby offset as fallback coordinates
                     center_coord = ((min_C + max_C) // 2).int()
-                    fallback_coord = torch.tensor([[0, center_coord[0], center_coord[1], center_coord[2]]],
-                                                  device=x.device, dtype=torch.int32)
-                    fallback_feat = torch.zeros((1, x.shape[1]), device=x.device, dtype=x.F.dtype)
+                    stride = x_infer_pruned.tensor_stride[0] if x_infer_pruned.tensor_stride else 1
+                    fallback_coords = torch.tensor([
+                        [0, center_coord[0], center_coord[1], center_coord[2]],
+                        [0, center_coord[0] + stride, center_coord[1], center_coord[2]],
+                    ], device=x.device, dtype=torch.int32)
+                    fallback_feat = torch.zeros((MIN_VOXELS_FOR_BN, x.shape[1]), device=x.device, dtype=x.F.dtype)
                     x_infer_pruned = ME.SparseTensor(
                         features=fallback_feat,
-                        coordinates=fallback_coord,
+                        coordinates=fallback_coords,
                         tensor_stride=x_infer_pruned.tensor_stride,
                         coordinate_manager=x.coordinate_manager,
                     )

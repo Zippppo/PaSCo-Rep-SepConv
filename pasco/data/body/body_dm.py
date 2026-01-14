@@ -20,6 +20,8 @@ class BodyDataModule(pl.LightningDataModule):
         n_subnets=1,
         complete_scale=8,
         voxel_size=4.0,
+        use_precomputed=False,
+        precomputed_root=None,
     ):
         """
         Args:
@@ -41,6 +43,8 @@ class BodyDataModule(pl.LightningDataModule):
         self.n_subnets = n_subnets
         self.complete_scale = complete_scale
         self.voxel_size = voxel_size
+        self.use_precomputed = use_precomputed
+        self.precomputed_root = precomputed_root
 
     def setup(self, stage=None):
         """Setup train, val, and test datasets."""
@@ -53,6 +57,8 @@ class BodyDataModule(pl.LightningDataModule):
             data_aug=False,  # No augmentation for body task
             complete_scale=self.complete_scale,
             voxel_size=self.voxel_size,
+            use_precomputed=self.use_precomputed,
+            precomputed_root=self.precomputed_root,
         )
 
         self.val_ds = BodyDataset(
@@ -64,6 +70,8 @@ class BodyDataModule(pl.LightningDataModule):
             data_aug=False,
             complete_scale=self.complete_scale,
             voxel_size=self.voxel_size,
+            use_precomputed=self.use_precomputed,
+            precomputed_root=self.precomputed_root,
         )
 
         self.test_ds = BodyDataset(
@@ -75,6 +83,8 @@ class BodyDataModule(pl.LightningDataModule):
             data_aug=False,
             complete_scale=self.complete_scale,
             voxel_size=self.voxel_size,
+            use_precomputed=self.use_precomputed,
+            precomputed_root=self.precomputed_root,
         )
 
     def train_dataloader(self):
@@ -85,6 +95,8 @@ class BodyDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             shuffle=True,
             pin_memory=True,
+            prefetch_factor=2 if self.num_workers > 0 else None,
+            persistent_workers=True if self.num_workers > 0 else False,
             worker_init_fn=worker_init_fn,
             collate_fn=collate_fn_simple,
         )
@@ -97,6 +109,8 @@ class BodyDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             shuffle=False,
             pin_memory=True,
+            prefetch_factor=2 if self.num_workers > 0 else None,
+            persistent_workers=True if self.num_workers > 0 else False,
             worker_init_fn=worker_init_fn,
             collate_fn=collate_fn_simple,
         )
@@ -109,6 +123,8 @@ class BodyDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             shuffle=False,
             pin_memory=True,
+            prefetch_factor=2 if self.num_workers > 0 else None,
+            persistent_workers=True if self.num_workers > 0 else False,
             worker_init_fn=worker_init_fn,
             collate_fn=collate_fn_simple,
         )

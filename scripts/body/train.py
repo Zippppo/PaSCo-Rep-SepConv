@@ -3,7 +3,7 @@
 Training script for body scene completion task.
 
 Usage:
-    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json --gpuids 1
+    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json --gpuids 1 --use_precomputed
 """
 
 import os
@@ -195,6 +195,8 @@ class MetricsLogger(Callback):
 @click.option('--seed', default=42, help='random seed')
 @click.option('--max_epochs', default=60, help='maximum epochs')
 @click.option('--check', is_flag=True, help='just check model initialization')
+@click.option('--use_precomputed', is_flag=True, help='Use precomputed multiscale labels for faster loading')
+@click.option('--precomputed_dir', default="", help='Path to precomputed data directory (default: {dataset_root}_precomputed)')
 def main(
     lr, wd,
     bs, scale, alpha,
@@ -206,7 +208,8 @@ def main(
     seed,
     transformer_dec_layers, transformer_enc_layers, n_infers, occ_weight,
     num_queries, use_se_layer, accum_batch, pretrained_model,
-    dataset_root, split_file, f, max_epochs, check
+    dataset_root, split_file, f, max_epochs, check,
+    use_precomputed, precomputed_dir
 ):
     set_random_seed(seed)
 
@@ -275,6 +278,21 @@ def main(
     compl_labelweights = np.power(np.amax(compl_labelweights) / compl_labelweights, 1 / 3.0)
     compl_labelweights = torch.from_numpy(compl_labelweights).float()
 
+    # Determine and validate precomputed directory
+    if use_precomputed:
+        if not precomputed_dir:
+            precomputed_dir = dataset_root + "_precomputed"
+
+        if not os.path.exists(precomputed_dir):
+            logger.error(f"Precomputed directory not found: {precomputed_dir}")
+            logger.error("Please run scripts/body/data/data_pre_process.py first")
+            raise FileNotFoundError(f"Directory does not exist: {precomputed_dir}")
+
+        logger.info(f"Using precomputed labels from: {precomputed_dir}")
+    else:
+        precomputed_dir = None
+        logger.info("Using on-the-fly label generation (original mode)")
+
     # Data module
     data_module = BodyDataModule(
         root=dataset_root,
@@ -283,6 +301,8 @@ def main(
         num_workers=int(n_workers_per_gpu),
         target_size=body_scene_size,
         n_subnets=n_infers,
+        use_precomputed=use_precomputed,
+        precomputed_root=precomputed_dir,
     )
 
     # Model
