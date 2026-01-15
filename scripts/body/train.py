@@ -3,7 +3,7 @@
 Training script for body scene completion task.
 
 Usage:
-    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json --gpuids 1 --use_precomputed
+    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json --gpuids 1 --use_precomputed --bs 32 --max_epochs 100 --exp_prefix body_instance
 """
 
 import os
@@ -240,11 +240,11 @@ def main(
     gpu_list = [int(x.strip()) for x in gpuids.split(',')]
     n_gpus = len(gpu_list)
 
-    # Body-specific parameters
-    body_n_classes = n_classes  # 72
+    # Body-specific parameters (imported from params.py)
+    body_n_classes = n_classes  # 36 semantic classes
     body_in_channels = 38  # xyz(3) + xyz_rel(3) + pos_enc(32)
     body_scene_size = (128, 128, 256)
-    body_thing_ids = thing_ids  # []
+    body_thing_ids = thing_ids  # 13 thing classes for instance segmentation
 
     encoder_dropouts = [point_dropout_ratio, 0.0, 0.0, 0.0, 0.0, 0.0]
     decoder_dropouts = [0.0, 0.0, 0.0, 0.0, 0.0]

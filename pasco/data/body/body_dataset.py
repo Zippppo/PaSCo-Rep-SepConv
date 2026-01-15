@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from .positional_encoding import sinusoidal_positional_encoding, normalize_coordinates
 from .params import thing_ids, n_classes
+from .label_mapping import remap_labels, N_CLASSES_OLD
 
 
 class BodyDataset(Dataset):
@@ -131,13 +132,20 @@ class BodyDataset(Dataset):
         # Load data
         data = np.load(npz_path)
         sensor_pc = data["sensor_pc"].astype(np.float32)  # [N, 3]
-        voxel_labels = data["voxel_labels"].astype(np.uint8)  # [D, H, W]
+        voxel_labels = data["voxel_labels"].astype(np.uint8)  # [D, H, W] - 72 classes
         grid_world_min = data["grid_world_min"].astype(np.float32)  # [3]
         grid_world_max = data["grid_world_max"].astype(np.float32)  # [3]
 
+        # Remap 72-class labels to 36-class semantic + instance labels
+        semantic_label_72, instance_label_raw = remap_labels(voxel_labels)
+
         # Normalize grid to target size (center alignment with crop/pad)
         semantic_label, pc_offset = self._normalize_grid_size(
-            voxel_labels, sensor_pc, grid_world_min
+            semantic_label_72, sensor_pc, grid_world_min
+        )
+        # Also normalize instance labels with same offset
+        instance_label, _ = self._normalize_grid_size(
+            instance_label_raw, sensor_pc, grid_world_min
         )
 
         # Adjust point cloud coordinates
@@ -160,18 +168,27 @@ class BodyDataset(Dataset):
         min_C = torch.tensor([0, 0, 0], dtype=torch.int32)
         max_C = torch.tensor(self.target_size, dtype=torch.int32) - 1
 
-        # Generate mask labels (semantic only, no instances)
+        # Convert to tensors
         semantic_label_tensor = torch.from_numpy(semantic_label)
-        instance_label = torch.zeros_like(semantic_label_tensor)  # No instances
-        mask_label = self._prepare_mask_label(semantic_label_tensor)
+        instance_label_tensor = torch.from_numpy(instance_label)
 
-        # Generate or load multi-scale labels
+        # Generate or load multi-scale labels (check for precomputed with new format)
         if self.use_precomputed and sample.get("precomputed_path") is not None:
-            geo_labels, sem_labels = self._load_precomputed_labels(
+            loaded = self._load_precomputed_labels(
                 sample["precomputed_path"], semantic_label_tensor
             )
+            if loaded is not None:
+                geo_labels, sem_labels, precomputed_instance = loaded
+                # Use precomputed instance labels if available
+                if precomputed_instance is not None:
+                    instance_label_tensor = precomputed_instance
+            else:
+                geo_labels, sem_labels = self._generate_multiscale_labels(semantic_label_tensor)
         else:
             geo_labels, sem_labels = self._generate_multiscale_labels(semantic_label_tensor)
+
+        # Generate mask labels with panoptic support (thing + stuff)
+        mask_label = self._prepare_mask_label(semantic_label_tensor, instance_label_tensor)
 
         ret_data = {
             "xyz": sensor_pc_adjusted,
@@ -183,12 +200,12 @@ class BodyDataset(Dataset):
             "min_C": min_C,
             "max_C": max_C,
             "semantic_label": semantic_label_tensor,
-            "instance_label": instance_label,
+            "instance_label": instance_label_tensor,
             "mask_label": mask_label,
             "geo_labels": geo_labels,
             "sem_labels": sem_labels,
             "semantic_label_origin": semantic_label_tensor.clone(),
-            "instance_label_origin": instance_label.clone(),
+            "instance_label_origin": instance_label_tensor.clone(),
             "mask_label_origin": mask_label,
             "input_pcd_instance_label": np.zeros((sensor_pc.shape[0], 1), dtype=np.int32),
         }
@@ -303,39 +320,99 @@ class BodyDataset(Dataset):
 
         return in_feat, in_coord
 
-    def _prepare_mask_label(self, semantic_label):
+    def _prepare_mask_label(self, semantic_label, instance_label):
         """
-        Prepare mask labels for semantic segmentation.
+        Prepare mask labels for panoptic segmentation.
 
-        For body task with thing_ids=[], all classes are treated as "stuff",
-        meaning we create one binary mask per unique class.
+        For stuff classes (not in thing_ids): one binary mask per unique class
+        For thing classes (in thing_ids): one binary mask per unique instance
 
         Args:
-            semantic_label: [D, H, W] semantic labels
+            semantic_label: [D, H, W] semantic labels (0-35)
+            instance_label: [D, H, W] instance IDs (0 for stuff, >0 for things)
 
         Returns:
             dict with "labels" and "masks"
         """
-        # Get unique labels, ignoring class 0 (outside_body)
-        unique_ids = torch.unique(semantic_label)
-        unique_ids = unique_ids[unique_ids != 0]
+        all_labels = []
+        all_masks = []
 
-        if len(unique_ids) == 0:
+        # 1. Handle stuff classes (not in thing_ids)
+        unique_sem_ids = torch.unique(semantic_label)
+        for sem_id in unique_sem_ids:
+            sem_id_val = sem_id.item()
+            # Skip background (class 0) and thing classes
+            if sem_id_val == 0 or sem_id_val in self.thing_ids:
+                continue
+            mask = semantic_label == sem_id
+            all_labels.append(sem_id)
+            all_masks.append(mask)
+
+        # 2. Handle thing classes (in thing_ids) - one mask per instance
+        unique_inst_ids = torch.unique(instance_label)
+        for inst_id in unique_inst_ids:
+            inst_id_val = inst_id.item()
+            if inst_id_val == 0:  # Skip non-instance voxels
+                continue
+            inst_mask = instance_label == inst_id
+            # Get the semantic class for this instance
+            # All voxels with this instance ID should have the same semantic class
+            sem_at_inst = semantic_label[inst_mask]
+            if len(sem_at_inst) > 0:
+                sem_id = sem_at_inst[0]  # Take first (all should be same)
+                # Only add if it's actually a thing class
+                if sem_id.item() in self.thing_ids:
+                    all_labels.append(sem_id)
+                    all_masks.append(inst_mask)
+
+        if len(all_masks) == 0:
             # No valid labels, return empty masks
             return {
                 "labels": torch.tensor([], dtype=torch.long),
                 "masks": torch.zeros((0,) + semantic_label.shape, dtype=torch.bool),
             }
 
-        masks = []
-        for label_id in unique_ids:
-            masks.append(semantic_label == label_id)
-
-        masks = torch.stack(masks)
+        masks = torch.stack(all_masks)
+        labels = torch.tensor([l.item() if torch.is_tensor(l) else l for l in all_labels], dtype=torch.long)
 
         return {
-            "labels": unique_ids.long(),
+            "labels": labels,
             "masks": masks,
+        }
+
+    @staticmethod
+    def prepare_instance_target(semantic_target, instance_target, ignore_label=0):
+        """
+        Prepare instance targets for thing classes.
+
+        Each unique instance_id becomes a separate mask.
+
+        Args:
+            semantic_target: [D, H, W] semantic labels
+            instance_target: [D, H, W] instance IDs
+            ignore_label: instance ID to ignore (default 0)
+
+        Returns:
+            dict with "labels" and "masks", or None if no instances
+        """
+        unique_instance_ids = torch.unique(instance_target)
+        unique_instance_ids = unique_instance_ids[unique_instance_ids != ignore_label]
+
+        if len(unique_instance_ids) == 0:
+            return None
+
+        masks = []
+        semantic_labels = []
+
+        for inst_id in unique_instance_ids:
+            inst_mask = instance_target == inst_id
+            masks.append(inst_mask)
+            # Get semantic label for this instance
+            semantic_labels.append(semantic_target[inst_mask][0])
+
+        return {
+            "labels": torch.tensor([l.item() for l in semantic_labels], dtype=torch.long),
+            "masks": torch.stack(masks),
         }
 
     def _generate_multiscale_labels(self, semantic_label):
@@ -419,22 +496,38 @@ class BodyDataset(Dataset):
         """
         Load precomputed multiscale labels from NPZ file with validation and fallback.
 
+        Supports both old format (72-class, no instance) and new format (36-class, with instance).
+
         Args:
             precomputed_path: str, path to precomputed .npz file
             semantic_label_tensor: torch.Tensor [D, H, W], for validation
 
         Returns:
-            geo_labels: dict with "1_1", "1_2", "1_4" keys (torch.Tensor)
-            sem_labels: dict with "1_1", "1_2", "1_4" keys (torch.Tensor)
+            tuple: (geo_labels, sem_labels, instance_label) or None if failed
+            - geo_labels: dict with "1_1", "1_2", "1_4" keys (torch.Tensor)
+            - sem_labels: dict with "1_1", "1_2", "1_4" keys (torch.Tensor)
+            - instance_label: torch.Tensor [D, H, W] or None if not available
         """
         try:
             data = np.load(precomputed_path)
 
-            # Validate semantic_label matches (ensure correct normalized grid)
-            if not np.array_equal(semantic_label_tensor.numpy(), data['semantic_label']):
-                import warnings
-                warnings.warn(f"semantic_label mismatch in {precomputed_path}, using on-the-fly generation")
-                return self._generate_multiscale_labels(semantic_label_tensor)
+            # Check if this is new format (36-class with instance_label)
+            has_instance = 'instance_label' in data
+
+            if has_instance:
+                # New format: semantic_label is already 36-class
+                # Validate shape matches
+                precomputed_sem = data['semantic_label']
+                if precomputed_sem.shape != semantic_label_tensor.shape:
+                    import warnings
+                    warnings.warn(f"Shape mismatch in {precomputed_path}, using on-the-fly generation")
+                    return None
+
+                instance_label = torch.from_numpy(data['instance_label'].astype(np.uint8))
+            else:
+                # Old format: needs remapping (this is fallback for old precomputed data)
+                # We don't validate exact match since old format has 72 classes
+                instance_label = None
 
             # Construct dictionaries
             geo_labels = {
@@ -449,9 +542,9 @@ class BodyDataset(Dataset):
                 "1_4": torch.from_numpy(data["sem_1_4"]),
             }
 
-            return geo_labels, sem_labels
+            return geo_labels, sem_labels, instance_label
 
         except Exception as e:
             import warnings
             warnings.warn(f"Failed to load {precomputed_path}: {e}. Using on-the-fly generation.")
-            return self._generate_multiscale_labels(semantic_label_tensor)
+            return None

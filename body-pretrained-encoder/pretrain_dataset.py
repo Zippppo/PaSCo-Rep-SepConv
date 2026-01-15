@@ -214,6 +214,7 @@ def build_dataloaders(config) -> Tuple[DataLoader, DataLoader]:
         num_workers=config.num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
+        drop_last=True,  # Drop incomplete batch to avoid spconv algorithm issues
     )
 
     return train_loader, val_loader

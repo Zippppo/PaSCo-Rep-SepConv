@@ -37,3 +37,5 @@ slurm
 
 .claude/settings.local.json
 .claude/settings.json
+
+body-pretrained-encoder/checkpoints

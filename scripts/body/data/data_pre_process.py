@@ -5,8 +5,10 @@ Precompute multiscale labels for body scene completion task.
 This script precomputes the expensive multiscale label generation to accelerate training.
 It processes voxel labels to generate geometric and semantic labels at multiple scales.
 
+NEW: Also generates instance labels for panoptic segmentation (36-class scheme).
+
 Usage:
-    python scripts/body/data_pre_process.py \
+    python scripts/body/data/data_pre_process.py \
         --input_dir Dataset/voxel_data \
         --output_dir Dataset/voxel_data_precomputed \
         --split_file dataset_split.json \
@@ -24,6 +26,12 @@ from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
+
+# Add project root to path for imports
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+
+from pasco.data.body.label_mapping import remap_labels, N_CLASSES_NEW, N_CLASSES_OLD
 
 # Setup logging
 logging.basicConfig(
@@ -300,12 +308,15 @@ def process_single_sample(args):
         voxel_labels = data["voxel_labels"].astype(np.uint8)
         grid_world_min = data["grid_world_min"].astype(np.float32)
 
-        # Step 1: Normalize grid size
-        semantic_label, pc_offset = normalize_grid_size(
+        # Step 1: Normalize grid size (still 72-class at this point)
+        normalized_labels_72, pc_offset = normalize_grid_size(
             voxel_labels, grid_world_min, target_size, voxel_size
         )
 
-        # Step 2: Generate multiscale labels
+        # Step 2: Remap 72-class to 36-class semantic + instance labels
+        semantic_label, instance_label = remap_labels(normalized_labels_72)
+
+        # Step 3: Generate multiscale labels (now using 36-class)
         if use_optimized:
             geo_labels, sem_labels = generate_multiscale_labels_optimized(
                 semantic_label, n_classes, device
@@ -315,11 +326,12 @@ def process_single_sample(args):
                 semantic_label, n_classes, device
             )
 
-        # Step 3: Save precomputed data
+        # Step 4: Save precomputed data (including instance_label for panoptic)
         output_path = os.path.join(output_dir, f"{sample_id}.npz")
         np.savez_compressed(
             output_path,
             semantic_label=semantic_label,
+            instance_label=instance_label,
             geo_1_1=geo_labels["1_1"],
             geo_1_2=geo_labels["1_2"],
             geo_1_4=geo_labels["1_4"],
@@ -360,13 +372,16 @@ def process_sequential(sample_ids, args_dict, device):
                 voxel_labels = data["voxel_labels"].astype(np.uint8)
                 grid_world_min = data["grid_world_min"].astype(np.float32)
 
-                # Step 1: Normalize grid size
-                semantic_label, pc_offset = normalize_grid_size(
+                # Step 1: Normalize grid size (still 72-class at this point)
+                normalized_labels_72, pc_offset = normalize_grid_size(
                     voxel_labels, grid_world_min,
                     args_dict['target_size'], args_dict['voxel_size']
                 )
 
-                # Step 2: Generate multiscale labels
+                # Step 2: Remap 72-class to 36-class semantic + instance labels
+                semantic_label, instance_label = remap_labels(normalized_labels_72)
+
+                # Step 3: Generate multiscale labels (now using 36-class)
                 if args_dict['use_optimized']:
                     geo_labels, sem_labels = generate_multiscale_labels_optimized(
                         semantic_label, args_dict['n_classes'], device
@@ -376,11 +391,12 @@ def process_sequential(sample_ids, args_dict, device):
                         semantic_label, args_dict['n_classes'], device
                     )
 
-                # Step 3: Save precomputed data
+                # Step 4: Save precomputed data (including instance_label for panoptic)
                 output_path = os.path.join(args_dict['output_dir'], f"{sample_id}.npz")
                 np.savez_compressed(
                     output_path,
                     semantic_label=semantic_label,
+                    instance_label=instance_label,
                     geo_1_1=geo_labels["1_1"],
                     geo_1_2=geo_labels["1_2"],
                     geo_1_4=geo_labels["1_4"],
@@ -409,7 +425,7 @@ def main():
     parser.add_argument('--split_file', type=str, required=True, help='Dataset split JSON file')
     parser.add_argument('--target_size', type=int, nargs=3, default=[128, 128, 256], help='Target grid size')
     parser.add_argument('--voxel_size', type=float, default=4.0, help='Voxel size in mm')
-    parser.add_argument('--n_classes', type=int, default=72, help='Number of classes')
+    parser.add_argument('--n_classes', type=int, default=N_CLASSES_NEW, help='Number of classes (default: 36 for new scheme)')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers (only for CPU mode)')
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU acceleration (disables multiprocessing)')
     parser.add_argument('--use_optimized', action='store_true', help='Use optimized mode pooling (faster but may differ slightly)')

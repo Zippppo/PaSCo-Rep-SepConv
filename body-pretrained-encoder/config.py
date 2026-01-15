@@ -33,6 +33,9 @@ class PretrainConfig:
     mask_ratio: float = 0.6
     mask_group_size: int = 32
 
+    # Validation metrics
+    fscore_threshold: float = 0.02  # F-Score threshold (adjust based on data scale)
+
     # MAE Decoder (MLP for coordinate prediction)
     mae_decoder_hidden_dims: Tuple[int, ...] = (256, 128)
 

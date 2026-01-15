@@ -1,15 +1,34 @@
+"""
+Body task parameters for panoptic segmentation.
+
+This module defines:
+- 36 semantic classes (merged from original 72)
+- 14 thing classes with instance segmentation
+- Class frequencies for loss weighting
+"""
 import numpy as np
 
-# Body task: no instance segmentation, only semantic
-# All 72 classes are treated as "stuff" (background/semantic only)
-thing_ids = []
+from .label_mapping import (
+    N_CLASSES_NEW,
+    THING_IDS,
+    CLASS_NAMES_NEW,
+    compute_new_class_frequencies,
+)
 
-# Class frequencies at different scales (voxel counts)
-# Scale 1_1: original resolution
-# Scale 1_2: 2x downsampling (volume / 8)
-# Scale 1_4: 4x downsampling (volume / 64)
-# Data derived from docs/dataset_statistics.json
-_counts_1_1 = np.array([
+# Thing class IDs (have instance segmentation)
+# kidney, adrenal_gland, rib, scapula, clavicula, humerus, hip, femur,
+# gluteus_maximus, gluteus_medius, gluteus_minimus, autochthon, iliopsoas
+thing_ids = THING_IDS
+
+# Number of classes
+n_classes = N_CLASSES_NEW  # 36
+
+# Class names
+class_names = CLASS_NAMES_NEW
+
+# Original 72-class counts (from dataset_statistics.json)
+# Used to compute aggregated frequencies for new 36-class scheme
+_counts_72_classes = np.array([
     1835148880,  # 0: outside_body
     1305194053,  # 1: inside_body_empty
     103424463,   # 2: liver
@@ -84,90 +103,29 @@ _counts_1_1 = np.array([
     0,           # 71: rectum (no samples in current dataset)
 ], dtype=np.float64)
 
-# Avoid zero frequency for rectum class (add small epsilon)
+# Compute aggregated class frequencies for 36-class scheme
+_counts_1_1 = compute_new_class_frequencies(_counts_72_classes)
+
+# Avoid zero frequency (add small epsilon)
 _counts_1_1[_counts_1_1 == 0] = 1.0
 
+# Class frequencies at different scales
 class_frequencies = {
     "1_1": _counts_1_1,
     "1_2": _counts_1_1 / 8.0,    # 2x downsampling: volume / 2^3
     "1_4": _counts_1_1 / 64.0,   # 4x downsampling: volume / 4^3
 }
 
-# 72 class names from Dataset/datainfo.json
-class_names = [
-    "outside_body",         # 0
-    "inside_body_empty",    # 1
-    "liver",                # 2
-    "spleen",               # 3
-    "kidney_left",          # 4
-    "kidney_right",         # 5
-    "stomach",              # 6
-    "pancreas",             # 7
-    "gallbladder",          # 8
-    "urinary_bladder",      # 9
-    "prostate",             # 10
-    "heart",                # 11
-    "brain",                # 12
-    "thyroid_gland",        # 13
-    "spinal_cord",          # 14
-    "lung",                 # 15
-    "esophagus",            # 16
-    "trachea",              # 17
-    "small_bowel",          # 18
-    "duodenum",             # 19
-    "colon",                # 20
-    "adrenal_gland_left",   # 21
-    "adrenal_gland_right",  # 22
-    "spine",                # 23
-    "rib_left_1",           # 24
-    "rib_left_2",           # 25
-    "rib_left_3",           # 26
-    "rib_left_4",           # 27
-    "rib_left_5",           # 28
-    "rib_left_6",           # 29
-    "rib_left_7",           # 30
-    "rib_left_8",           # 31
-    "rib_left_9",           # 32
-    "rib_left_10",          # 33
-    "rib_left_11",          # 34
-    "rib_left_12",          # 35
-    "rib_right_1",          # 36
-    "rib_right_2",          # 37
-    "rib_right_3",          # 38
-    "rib_right_4",          # 39
-    "rib_right_5",          # 40
-    "rib_right_6",          # 41
-    "rib_right_7",          # 42
-    "rib_right_8",          # 43
-    "rib_right_9",          # 44
-    "rib_right_10",         # 45
-    "rib_right_11",         # 46
-    "rib_right_12",         # 47
-    "skull",                # 48
-    "sternum",              # 49
-    "costal_cartilages",    # 50
-    "scapula_left",         # 51
-    "scapula_right",        # 52
-    "clavicula_left",       # 53
-    "clavicula_right",      # 54
-    "humerus_left",         # 55
-    "humerus_right",        # 56
-    "hip_left",             # 57
-    "hip_right",            # 58
-    "femur_left",           # 59
-    "femur_right",          # 60
-    "gluteus_maximus_left", # 61
-    "gluteus_maximus_right",# 62
-    "gluteus_medius_left",  # 63
-    "gluteus_medius_right", # 64
-    "gluteus_minimus_left", # 65
-    "gluteus_minimus_right",# 66
-    "autochthon_left",      # 67
-    "autochthon_right",     # 68
-    "iliopsoas_left",       # 69
-    "iliopsoas_right",      # 70
-    "rectum",               # 71
-]
 
-# Number of classes
-n_classes = 72
+def print_class_info():
+    """Print class information for debugging."""
+    print(f"Number of classes: {n_classes}")
+    print(f"Thing class IDs: {thing_ids}")
+    print(f"\nClass frequencies (36 classes):")
+    for i, (name, count) in enumerate(zip(class_names, _counts_1_1)):
+        thing_marker = " [THING]" if i in thing_ids else ""
+        print(f"  {i:2d}: {name:25s} {count:15.0f}{thing_marker}")
+
+
+if __name__ == "__main__":
+    print_class_info()
