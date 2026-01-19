@@ -114,6 +114,10 @@ def compute_sem_compl_loss_kitti360(
                 sem_logit.F, target_sparse, ignores=[255], classes="present"
             )
 
+            # Handle case where lovasz returns int 0 (when no valid classes present)
+            if isinstance(lovasz_loss, (int, float)):
+                lovasz_loss = torch.tensor(lovasz_loss, device=sem_logit.F.device, dtype=sem_logit.F.dtype)
+
             ce_losses.append(ce_loss)
             lovasz_losses.append(lovasz_loss)
     ce_losses = torch.stack(ce_losses).mean()
@@ -169,6 +173,10 @@ def compute_sem_compl_loss(
             lovasz_loss = lovasz_softmax_flat(
                 sem_logit.F, target_sparse, ignores=[255], classes="present"
             )
+
+            # Handle case where lovasz returns int 0 (when no valid classes present)
+            if isinstance(lovasz_loss, (int, float)):
+                lovasz_loss = torch.tensor(lovasz_loss, device=sem_logit.F.device, dtype=sem_logit.F.dtype)
 
             ce_losses.append(ce_loss)
             lovasz_losses.append(lovasz_loss)

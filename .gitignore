@@ -39,3 +39,4 @@ slurm
 .claude/settings.json
 
 body-pretrained-encoder/checkpoints
+body-pretrained-encoder/test

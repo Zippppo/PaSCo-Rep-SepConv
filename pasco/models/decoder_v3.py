@@ -194,8 +194,13 @@ class DecoderGenerativeSepConvV2(nn.Module):
         scene_size=(256, 256, 32),
         drop_path_rates=[0.0] * 9,
         num_queries=100,
+        warmup_epochs=0,
     ):
         nn.Module.__init__(self)
+
+        # Warmup: skip class-based pruning for first N epochs
+        self.warmup_epochs = warmup_epochs
+        self.current_epoch = 0  # Updated by Net before each forward
 
         dec_ch = f[::-1]
         self.n_infers = n_infers
@@ -332,7 +337,13 @@ class DecoderGenerativeSepConvV2(nn.Module):
             max_C = max_Cs[i_infer]
             sem_prob = F.softmax(sem_logit.F, dim=-1)
             sem_prob, sem_class = sem_prob.max(-1)
-            keep = sem_class != 0
+
+            # Warmup: skip class-based pruning for first N epochs
+            if self.training and self.current_epoch < self.warmup_epochs:
+                keep = torch.ones_like(sem_class, dtype=torch.bool)
+            else:
+                keep = sem_class != 0
+
             sem_label = sem_labels["1_{}".format(scale)][
                 i_infer
             ]  # not use during validation
@@ -416,7 +427,12 @@ class DecoderGenerativeSepConvV2(nn.Module):
                     i_infer
                 ]  # not use during validation
 
-                keep = sem_class != 0
+                # Warmup: skip class-based pruning for first N epochs
+                if self.training and self.current_epoch < self.warmup_epochs:
+                    keep = torch.ones_like(sem_class, dtype=torch.bool)
+                else:
+                    keep = sem_class != 0
+
                 if keep.sum() == 0:  # keep some voxels to avoid error
                     keep = torch.zeros_like(keep).bool()
                     keep[:1000] = True

@@ -104,8 +104,10 @@ class UNet3DV2(nn.Module):
         query_sample_ratio=0.5,
         f_maps=32,
         drop_path_rate=0.0,
+        warmup_epochs=0,
     ):
         super(UNet3DV2, self).__init__()
+        self.warmup_epochs = warmup_epochs
         print(
             "dropout_type: ",
             dropout_type,
@@ -167,6 +169,7 @@ class UNet3DV2(nn.Module):
             act_layer=sparse_act_layer,
             num_queries=num_queries,
             norm_layer=sparse_norm_layer,
+            warmup_epochs=self.warmup_epochs,
         )
 
         self.encoder = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(self.encoder)

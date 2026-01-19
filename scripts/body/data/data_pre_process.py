@@ -5,15 +5,17 @@ Precompute multiscale labels for body scene completion task.
 This script precomputes the expensive multiscale label generation to accelerate training.
 It processes voxel labels to generate geometric and semantic labels at multiple scales.
 
-NEW: Also generates instance labels for panoptic segmentation (36-class scheme).
+NEW: Also generates instance labels for panoptic segmentation (35-class scheme).
+- outside_body is mapped to 255 (IGNORE_LABEL)
+- Class 0: inside_body_empty
+- Classes 1-34: organs
 
 Usage:
     python scripts/body/data/data_pre_process.py \
         --input_dir Dataset/voxel_data \
         --output_dir Dataset/voxel_data_precomputed \
         --split_file dataset_split.json \
-        --num_workers 8 \
-        --use_gpu
+        --num_workers 8
 """
 
 import os
@@ -31,7 +33,7 @@ import logging
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
-from pasco.data.body.label_mapping import remap_labels, N_CLASSES_NEW, N_CLASSES_OLD
+from pasco.data.body.label_mapping import remap_labels, N_CLASSES_NEW, N_CLASSES_OLD, IGNORE_LABEL
 
 # Setup logging
 logging.basicConfig(
@@ -54,12 +56,15 @@ def normalize_grid_size(labels, grid_world_min, target_size=(128, 128, 256), vox
     Returns:
         normalized_labels: [TD, TH, TW] normalized labels
         pc_offset: [3] offset to apply to point cloud (in mm)
+
+    Note:
+        Padding is filled with IGNORE_LABEL (255) for regions outside original data.
     """
     D, H, W = labels.shape
     TD, TH, TW = target_size
 
-    # Create result array filled with class 0 (outside_body)
-    result = np.zeros((TD, TH, TW), dtype=labels.dtype)
+    # Create result array filled with IGNORE_LABEL (255) for padding
+    result = np.full((TD, TH, TW), IGNORE_LABEL, dtype=labels.dtype)
 
     # Compute center alignment offsets
     d_off = (TD - D) // 2
@@ -100,7 +105,7 @@ def normalize_grid_size(labels, grid_world_min, target_size=(128, 128, 256), vox
     return result, pc_offset
 
 
-def generate_multiscale_labels_optimized(semantic_label, n_classes=72, device='cpu'):
+def generate_multiscale_labels_optimized(semantic_label, n_classes=35, device='cpu'):
     """
     Generate multi-scale geometric and semantic labels (optimized version).
 
@@ -108,13 +113,18 @@ def generate_multiscale_labels_optimized(semantic_label, n_classes=72, device='c
     creating huge tensors.
 
     Args:
-        semantic_label: [D, H, W] numpy array or torch tensor
-        n_classes: int, number of classes (default 72)
+        semantic_label: [D, H, W] numpy array or torch tensor (values 0-34 or 255)
+        n_classes: int, number of classes (default 35)
         device: str or torch.device
 
     Returns:
         geo_labels: dict with "1_1", "1_2", "1_4" keys
         sem_labels: dict with "1_1", "1_2", "1_4" keys
+
+    Note:
+        - Class 255 (IGNORE_LABEL): outside_body/padding, ignored
+        - Class 0: inside_body_empty (background)
+        - Classes 1-34: organs (occupied)
     """
     if isinstance(semantic_label, np.ndarray):
         semantic_label = torch.from_numpy(semantic_label).long()
@@ -124,19 +134,24 @@ def generate_multiscale_labels_optimized(semantic_label, n_classes=72, device='c
     # Move to device
     semantic_label = semantic_label.to(device)
 
-    # Compute occupancy: class > 1 means occupied
+    # Compute occupancy: class >= 1 means occupied (organs)
+    # Class 0 = inside_body_empty, Class 255 = IGNORE (padding/outside)
     complete_voxel = semantic_label.clone().float()
-    complete_voxel[semantic_label > 1] = 1  # Actual organs are occupied
-    complete_voxel[semantic_label <= 1] = 0
+    complete_voxel[semantic_label >= 1] = 1  # Actual organs are occupied
+    complete_voxel[semantic_label == 0] = 0  # inside_body_empty
+    complete_voxel[semantic_label == IGNORE_LABEL] = 0  # padding/outside
 
     scales = [1, 2, 4]
     geo_labels = {}
     sem_labels = {}
 
+    # Create ignore mask for handling IGNORE_LABEL in downsampling
+    ignore_mask = (semantic_label == IGNORE_LABEL)
+
     for scale in scales:
         if scale == 1:
             downscaled_geo = complete_voxel
-            downscaled_sem = semantic_label
+            downscaled_sem = semantic_label.clone()
         else:
             # Geometric: max pooling (simple and fast)
             downscaled_geo = F.max_pool3d(
@@ -147,7 +162,7 @@ def generate_multiscale_labels_optimized(semantic_label, n_classes=72, device='c
 
             # Semantic: optimized voting without full one-hot
             # Use mode pooling approximation: most frequent class in each block
-            downscaled_sem = semantic_mode_pool3d(semantic_label, scale, n_classes)
+            downscaled_sem = semantic_mode_pool3d(semantic_label, scale, n_classes, ignore_mask)
 
         geo_labels[f"1_{scale}"] = downscaled_geo.cpu().numpy().astype(np.uint8)
         sem_labels[f"1_{scale}"] = downscaled_sem.cpu().numpy().astype(np.uint8)
@@ -155,7 +170,7 @@ def generate_multiscale_labels_optimized(semantic_label, n_classes=72, device='c
     return geo_labels, sem_labels
 
 
-def semantic_mode_pool3d(semantic_label, scale, n_classes):
+def semantic_mode_pool3d(semantic_label, scale, n_classes, ignore_mask=None):
     """
     Semantic downsampling using mode (most frequent class) pooling.
 
@@ -163,12 +178,18 @@ def semantic_mode_pool3d(semantic_label, scale, n_classes):
     Uses a voting mechanism over each downsampled block.
 
     Args:
-        semantic_label: [D, H, W] torch tensor
+        semantic_label: [D, H, W] torch tensor (values 0-34 or 255)
         scale: int, downsampling factor
-        n_classes: int, number of classes
+        n_classes: int, number of classes (35)
+        ignore_mask: [D, H, W] bool tensor marking IGNORE_LABEL positions
 
     Returns:
         downscaled: [D//scale, H//scale, W//scale] torch tensor
+
+    Note:
+        - Class 0: inside_body_empty (background)
+        - Classes 1-34: organs
+        - Class 255: IGNORE_LABEL (padding/outside)
     """
     device = semantic_label.device
     D, H, W = semantic_label.shape
@@ -188,8 +209,16 @@ def semantic_mode_pool3d(semantic_label, scale, n_classes):
     # Reshape to [D_out, H_out, W_out, scale^3]
     reshaped = reshaped.view(D_out, H_out, W_out, -1)
 
+    # Also reshape ignore_mask if provided
+    if ignore_mask is not None:
+        ignore_reshaped = ignore_mask[:D_out*scale, :H_out*scale, :W_out*scale].reshape(
+            D_out, scale, H_out, scale, W_out, scale
+        ).permute(0, 2, 4, 1, 3, 5).contiguous().view(D_out, H_out, W_out, -1)
+    else:
+        ignore_reshaped = None
+
     # For each block, find the most frequent non-empty class
-    # Strategy: separate organ classes from empty classes
+    # Strategy: separate organ classes from empty/ignore classes
     downscaled = torch.zeros(D_out, H_out, W_out, dtype=torch.long, device=device)
 
     for d in range(D_out):
@@ -197,25 +226,55 @@ def semantic_mode_pool3d(semantic_label, scale, n_classes):
             for w in range(W_out):
                 block = reshaped[d, h, w]  # [scale^3]
 
-                # Count organ classes (> 1)
-                organ_mask = block > 1
+                # Get valid (non-IGNORE) values
+                if ignore_reshaped is not None:
+                    valid_mask = ~ignore_reshaped[d, h, w]
+                    valid_block = block[valid_mask]
+                else:
+                    valid_block = block
+
+                if valid_block.numel() == 0:
+                    # All values are IGNORE
+                    downscaled[d, h, w] = IGNORE_LABEL
+                    continue
+
+                # Count organ classes (>= 1)
+                organ_mask = valid_block >= 1
                 if organ_mask.any():
                     # Use mode of organ classes
-                    organ_classes = block[organ_mask]
+                    organ_classes = valid_block[organ_mask]
                     downscaled[d, h, w] = torch.mode(organ_classes).values
                 else:
-                    # Use mode of empty classes (0 or 1)
-                    downscaled[d, h, w] = torch.mode(block).values
+                    # Check if mostly IGNORE or inside_body_empty
+                    if ignore_reshaped is not None:
+                        ignore_count = ignore_reshaped[d, h, w].sum()
+                        total_count = block.numel()
+                        if ignore_count > total_count // 2:
+                            downscaled[d, h, w] = IGNORE_LABEL
+                        else:
+                            downscaled[d, h, w] = 0  # inside_body_empty
+                    else:
+                        downscaled[d, h, w] = torch.mode(valid_block).values
 
     return downscaled
 
 
-def generate_multiscale_labels_original(semantic_label, n_classes=72, device='cpu'):
+def generate_multiscale_labels_original(semantic_label, n_classes=35, device='cpu'):
     """
     Generate multi-scale labels using the original one-hot method.
 
     This is the original implementation from BodyDataset, kept for reference
     and validation purposes.
+
+    Args:
+        semantic_label: [D, H, W] numpy array or torch tensor (values 0-34 or 255)
+        n_classes: int, number of classes (default 35)
+        device: str or torch.device
+
+    Note:
+        - Class 255 (IGNORE_LABEL): outside_body/padding, ignored
+        - Class 0: inside_body_empty (background)
+        - Classes 1-34: organs (occupied)
     """
     if isinstance(semantic_label, np.ndarray):
         semantic_label = torch.from_numpy(semantic_label).long()
@@ -224,23 +283,29 @@ def generate_multiscale_labels_original(semantic_label, n_classes=72, device='cp
 
     semantic_label = semantic_label.to(device)
 
-    # Compute occupancy
+    # Create ignore mask
+    ignore_mask = (semantic_label == IGNORE_LABEL)
+
+    # Compute occupancy: class >= 1 means occupied (organs)
     complete_voxel = semantic_label.clone().float()
-    complete_voxel[semantic_label > 1] = 1
-    complete_voxel[semantic_label <= 1] = 0
+    complete_voxel[semantic_label >= 1] = 1
+    complete_voxel[semantic_label == 0] = 0
+    complete_voxel[ignore_mask] = 0
 
     scales = [1, 2, 4]
     geo_labels = {}
     sem_labels = {}
 
     # One-hot encoding for semantic labels
+    # Replace IGNORE_LABEL (255) with 0 temporarily for one-hot encoding
     temp = semantic_label.clone().long()
+    temp[temp == IGNORE_LABEL] = 0
     sem_label_oh = F.one_hot(temp, num_classes=n_classes).permute(3, 0, 1, 2).float()
 
     for scale in scales:
         if scale == 1:
             downscaled_geo = complete_voxel
-            downscaled_sem = semantic_label
+            downscaled_sem = semantic_label.clone()
         else:
             # Geometric: max pooling
             downscaled_geo = F.max_pool3d(
@@ -250,9 +315,9 @@ def generate_multiscale_labels_original(semantic_label, n_classes=72, device='cp
             ).squeeze(0).squeeze(0)
 
             # Semantic: average pooling then argmax
+            # Only consider organ classes for voting (classes 1-34)
             sem_label_oh_occ = sem_label_oh.clone()
-            sem_label_oh_occ[0, :, :, :] = 0  # Exclude outside_body
-            sem_label_oh_occ[1, :, :, :] = 0  # Exclude inside_body_empty
+            sem_label_oh_occ[0, :, :, :] = 0  # Exclude inside_body_empty from voting
 
             downscaled_sem_oh = F.avg_pool3d(
                 sem_label_oh_occ.unsqueeze(0),
@@ -264,17 +329,20 @@ def generate_multiscale_labels_original(semantic_label, n_classes=72, device='cp
 
             # Handle empty voxels
             has_organ = downscaled_sem_oh.sum(dim=0) > 0
-            sem_label_oh_empty = sem_label_oh.clone()
-            sem_label_oh_empty[2:, :, :, :] = 0
-            downscaled_empty = F.avg_pool3d(
-                sem_label_oh_empty.unsqueeze(0),
+
+            # Downsample ignore mask to determine if region should be IGNORE
+            ignore_mask_float = ignore_mask.float().unsqueeze(0).unsqueeze(0)
+            downscaled_ignore = F.avg_pool3d(
+                ignore_mask_float,
                 kernel_size=scale,
                 stride=scale,
-            ).squeeze(0)
-            has_empty_class = downscaled_empty.sum(dim=0) > 0
-            downscaled_empty_label = torch.argmax(downscaled_empty, dim=0)
-            downscaled_empty_label[~has_empty_class] = 0
-            downscaled_sem[~has_organ] = downscaled_empty_label[~has_organ]
+            ).squeeze(0).squeeze(0)
+            mostly_ignore = downscaled_ignore > 0.5
+
+            # Default empty regions to inside_body_empty (0)
+            downscaled_sem[~has_organ] = 0
+            # Override with IGNORE_LABEL where mostly ignored
+            downscaled_sem[~has_organ & mostly_ignore] = IGNORE_LABEL
 
         geo_labels[f"1_{scale}"] = downscaled_geo.cpu().numpy().astype(np.uint8)
         sem_labels[f"1_{scale}"] = downscaled_sem.cpu().numpy().astype(np.uint8)
@@ -313,10 +381,10 @@ def process_single_sample(args):
             voxel_labels, grid_world_min, target_size, voxel_size
         )
 
-        # Step 2: Remap 72-class to 36-class semantic + instance labels
+        # Step 2: Remap 72-class to 35-class semantic + instance labels
         semantic_label, instance_label = remap_labels(normalized_labels_72)
 
-        # Step 3: Generate multiscale labels (now using 36-class)
+        # Step 3: Generate multiscale labels (now using 35-class)
         if use_optimized:
             geo_labels, sem_labels = generate_multiscale_labels_optimized(
                 semantic_label, n_classes, device
@@ -425,7 +493,7 @@ def main():
     parser.add_argument('--split_file', type=str, required=True, help='Dataset split JSON file')
     parser.add_argument('--target_size', type=int, nargs=3, default=[128, 128, 256], help='Target grid size')
     parser.add_argument('--voxel_size', type=float, default=4.0, help='Voxel size in mm')
-    parser.add_argument('--n_classes', type=int, default=N_CLASSES_NEW, help='Number of classes (default: 36 for new scheme)')
+    parser.add_argument('--n_classes', type=int, default=N_CLASSES_NEW, help='Number of classes (default: 35 for new scheme)')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers (only for CPU mode)')
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU acceleration (disables multiprocessing)')
     parser.add_argument('--use_optimized', action='store_true', help='Use optimized mode pooling (faster but may differ slightly)')

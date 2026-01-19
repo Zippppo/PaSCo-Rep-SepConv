@@ -1,21 +1,31 @@
 # Body Scene Completion Configuration
 # Adapted from PaSCo for human body organ segmentation
-# Updated for 36-class panoptic segmentation (72->36 class mapping with instances)
+#
+# All-Instance Strategy:
+# - All organ classes (2-35) are treated as instances
+# - Class 0 (outside_body): IGNORED in loss
+# - Class 1 (inside_body_empty): Low weight background
+# - Total ~69 instances per sample
+# - 400 queries for 5.8x redundancy
 
 dataset: body
 n_classes: 36  # 36 semantic classes (merged from original 72)
 scene_size: [128, 128, 256]  # [D, H, W] in voxels
 in_channels: 38  # xyz(3) + xyz_rel(3) + pos_enc(32)
 n_infers: 1  # MVP - single inference
-num_queries: 100
+num_queries: 400  # ~69 instances * 5.8x redundancy
 voxel_size: 4  # mm
-thing_ids: [23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]  # 13 thing classes with instances
+
+# All-Instance: all organ classes (2-35) are thing classes
+# Single-instance: [2-22] (21 classes)
+# Multi-instance: [23-35] (13 classes, includes paired organs and ribs)
+thing_ids: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
 
 # Training parameters
-lr: 0.0003
+lr: 0.0002  # Slightly lower for stability with more queries
 weight_decay: 0.0
 batch_size: 1
-max_epochs: 60
+max_epochs: 100
 
 # Model architecture
 f: 64  # base feature dimension
@@ -24,15 +34,23 @@ net_3d_dropout: 0.0
 heavy_decoder: false
 use_se_layer: false
 
-# Loss weights
-mask_weight: 40.0
+# Loss weights (adjusted to break "dead loop" in Hungarian matching)
+# - ce_weight increased to 10.0 (in net_panoptic_sparse.py)
+# - mask_weight reduced to balance with classification loss
+# - dustbin class weight increased to 0.5 (in train.py)
+mask_weight: 20.0  # Reduced from 50.0 to balance with ce_weight=10.0
 occ_weight: 1.0
 alpha: 0.0  # uncertainty weight
 
 # Transformer
 transformer_enc_layers: 0
-transformer_dec_layers: 1
+transformer_dec_layers: 2  # Increased for better query learning
 
 # Data
 data_aug: false  # no augmentation for body task
 point_dropout_ratio: 0.0
+
+# Class weights for loss (set in train.py)
+# class_weight[0] = 0.0   # outside_body: IGNORED
+# class_weight[1] = 0.05  # inside_body_empty: low weight
+# class_weight[2:] = 1.0  # organs: normal weight

@@ -74,6 +74,7 @@ class Net(pl.LightningModule):
         scene_size=None,
         thing_ids=None,
         max_steps=50000,  # Maximum steps for lr scheduler
+        warmup_epochs=0,  # Epochs without class-based pruning in decoder
     ):
         super().__init__()
         self.n_infers = n_infers
@@ -143,16 +144,17 @@ class Net(pl.LightningModule):
             query_sample_ratio=query_sample_ratio,
             encoder_dropouts=encoder_dropouts,
             use_se_layer=use_se_layer,
+            warmup_epochs=warmup_epochs,
         )
 
         self.ensembler = Ensembler()
 
         self.panop_weight = 1.0
-        self.ce_weight = 2.0
+        self.ce_weight = 10.0  # Increased from 2.0 to break "dead loop" in Hungarian matching
         self.occ_weight = occ_weight
 
         self.sem_weight_dict = {"loss_ce": 0.3, "loss_lovasz": 1.0}
-        self.dice_weight = 1.0
+        self.dice_weight = 5.0  # Increased from 1.0, maintain mask:dice ≈ 4:1 ratio
         self.mask_weight = mask_weight
 
         self.weight_dict = {
@@ -168,8 +170,10 @@ class Net(pl.LightningModule):
             self.weight_dict["ssc_lovasz"] = 0.0
 
         # building criterion
+        # Increased cost_class to give classification more weight in Hungarian matching
+        # This helps break the "dead loop" where model predicts all background
         matcher = HungarianMatcher(
-            cost_class=1.0,
+            cost_class=5.0,  # Increased from 1.0
             cost_mask=self.mask_weight,
             cost_dice=self.dice_weight,
         )
@@ -325,6 +329,8 @@ class Net(pl.LightningModule):
         return ret
 
     def step(self, batch, step_type):
+        # Update decoder's current_epoch for warmup logic
+        self.unet3d.decoder_generative.current_epoch = self.current_epoch
 
         geo_labels = batch["geo_labels"]
         sem_labels = batch["sem_labels"]
@@ -549,6 +555,7 @@ class Net(pl.LightningModule):
             "panop_out_subnets": panop_out_subnets,
         }
 
+    @torch.no_grad()
     def step_inference(
         self,
         batch,
@@ -792,6 +799,10 @@ class Net(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         print("validation_epoch_end")
+
+        # Clear MinkowskiEngine coordinate cache and GPU memory to prevent OOM
+        ME.clear_global_coordinate_manager()
+        torch.cuda.empty_cache()
 
         for i_infer in range(self.n_infers + 1):
             for step_type in ["train", "val"]:

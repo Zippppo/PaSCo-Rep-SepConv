@@ -1,237 +1,149 @@
-     Body任务实例分割实现计划
+当前状态总结
 
-     概述
+  问题分析
+  ┌────────────────────────┬─────────────────────────────────────────┬───────────────────────────────────────┐
+  │          问题          │                当前状态                 │               目标状态                │
+  ├────────────────────────┼─────────────────────────────────────────┼───────────────────────────────────────┤
+  │ outside_body (class 0) │ 权重=0，但模型仍输出 37 类 (36+dustbin) │ 完全移除，模型输出 36 类 (35+dustbin) │
+  ├────────────────────────┼─────────────────────────────────────────┼───────────────────────────────────────┤
+  │ inside_body_empty      │ class 1, 权重=0.05                      │ class 1, 权重=0.1 (对应 KITTI empty)  │
+  ├────────────────────────┼─────────────────────────────────────────┼───────────────────────────────────────┤
+  │ organs (2-35)          │ 语义+实例分离                           │ 保持不变 ✓                            │
+  ├────────────────────────┼─────────────────────────────────────────┼───────────────────────────────────────┤
+  │ precomputed data       │ 基于 36 类                              │ 需要重新生成 (35 类)                  │
+  └────────────────────────┴─────────────────────────────────────────┴───────────────────────────────────────┘
+  类别映射变化
 
-     将72类body标签重新映射为36类语义标签 + 实例ID，添加panoptic分割支持。
+  旧 (36类)                    新 (35类)
+  ─────────────────────────────────────────
+  0: outside_body      →       移除 (ignore=255)
+  1: inside_body_empty →       0: inside_body_empty
+  2: skeleton          →       1: skeleton
+  3: brain             →       2: brain
+  ...
+  35: rib              →       34: rib
 
-     目标
+  ---
+  完整修改计划
 
-     1. 利用Transformer queries: 14个thing类，最多50个实例/样本
-     2. 缓解类别不平衡: 合并24根肋骨为单一"rib"类
-     3. 减少分类难度: 72类→36类
+  Phase 1: 数据层修改
 
-     ---
-     新类别体系
+  1.1 修改 pasco/data/body/label_mapping.py
 
-     Stuff类 (22个，无实例)
-     ┌──────┬───────────────────┬──────┐
-     │ 新ID │       类名        │ 原ID │
-     ├──────┼───────────────────┼──────┤
-     │ 0    │ outside_body      │ 0    │
-     ├──────┼───────────────────┼──────┤
-     │ 1    │ inside_body_empty │ 1    │
-     ├──────┼───────────────────┼──────┤
-     │ 2    │ liver             │ 2    │
-     ├──────┼───────────────────┼──────┤
-     │ 3    │ spleen            │ 3    │
-     ├──────┼───────────────────┼──────┤
-     │ 4    │ stomach           │ 6    │
-     ├──────┼───────────────────┼──────┤
-     │ 5    │ pancreas          │ 7    │
-     ├──────┼───────────────────┼──────┤
-     │ 6    │ gallbladder       │ 8    │
-     ├──────┼───────────────────┼──────┤
-     │ 7    │ urinary_bladder   │ 9    │
-     ├──────┼───────────────────┼──────┤
-     │ 8    │ prostate          │ 10   │
-     ├──────┼───────────────────┼──────┤
-     │ 9    │ heart             │ 11   │
-     ├──────┼───────────────────┼──────┤
-     │ 10   │ brain             │ 12   │
-     ├──────┼───────────────────┼──────┤
-     │ 11   │ thyroid_gland     │ 13   │
-     ├──────┼───────────────────┼──────┤
-     │ 12   │ spinal_cord       │ 14   │
-     ├──────┼───────────────────┼──────┤
-     │ 13   │ lung              │ 15   │
-     ├──────┼───────────────────┼──────┤
-     │ 14   │ esophagus         │ 16   │
-     ├──────┼───────────────────┼──────┤
-     │ 15   │ trachea           │ 17   │
-     ├──────┼───────────────────┼──────┤
-     │ 16   │ small_bowel       │ 18   │
-     ├──────┼───────────────────┼──────┤
-     │ 17   │ duodenum          │ 19   │
-     ├──────┼───────────────────┼──────┤
-     │ 18   │ colon             │ 20   │
-     ├──────┼───────────────────┼──────┤
-     │ 19   │ spine             │ 23   │
-     ├──────┼───────────────────┼──────┤
-     │ 20   │ skull             │ 48   │
-     ├──────┼───────────────────┼──────┤
-     │ 21   │ sternum           │ 49   │
-     ├──────┼───────────────────┼──────┤
-     │ 22   │ costal_cartilages │ 50   │
-     └──────┴───────────────────┴──────┘
-     Thing类 (14个，有实例)
-     ┌──────┬─────────────────┬───────┬──────────────────────────────┐
-     │ 新ID │      类名       │ 原ID  │            实例数            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 23   │ kidney          │ 4,5   │ 2 (L=1, R=2)                 │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 24   │ adrenal_gland   │ 21,22 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 25   │ rib             │ 24-47 │ 24 (L1-12→1-12, R1-12→13-24) │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 26   │ scapula         │ 51,52 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 27   │ clavicula       │ 53,54 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 28   │ humerus         │ 55,56 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 29   │ hip             │ 57,58 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 30   │ femur           │ 59,60 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 31   │ gluteus_maximus │ 61,62 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 32   │ gluteus_medius  │ 63,64 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 33   │ gluteus_minimus │ 65,66 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 34   │ autochthon      │ 67,68 │ 2                            │
-     ├──────┼─────────────────┼───────┼──────────────────────────────┤
-     │ 35   │ iliopsoas       │ 69,70 │ 2                            │
-     └──────┴─────────────────┴───────┴──────────────────────────────┘
-     注意: rectum (原ID 71) 无数据，不包含在映射中。
+  - 将 outside_body 映射到 255 (ignore label)
+  - 所有其他类别 ID 减 1
+  - 更新 remap_labels() 函数
 
-     实例ID格式
+  1.2 修改 pasco/data/body/params.py
 
-     - Panoptic格式: semantic_id * 1000 + instance_id
-     - 例如: kidney左=23001, kidney右=23002, rib左1=25001, rib右12=25024
+  - n_classes: 36 → 35
+  - class_names: 移除 "outside_body"
+  - thing_ids: 所有 ID 减 1
+  - single_instance_ids: 所有 ID 减 1
+  - multi_instance_ids: 所有 ID 减 1
+  - class_frequencies: 移除 class 0 的频率
 
-     ---
-     实现步骤
+  1.3 修改 pasco/data/body/body_dataset.py
 
-     Step 1: 创建标签映射模块
+  - _normalize_grid_size(): 填充值从 0 改为 255
+  - _generate_multiscale_labels(): 更新空区域处理逻辑
+  - _prepare_mask_label(): 更新 skip 逻辑 (原 class 0,1 → 新 255,0)
 
-     文件: pasco/data/body/label_mapping.py (新建)
+  1.4 重新运行预处理脚本
 
-     """72类→36类映射 + 实例ID生成"""
-     import numpy as np
+  python scripts/body/data/data_pre_process.py \
+      --dataset_root Dataset/voxel_data \
+      --output_root Dataset/voxel_data_precomputed_v2 \
+      --split_file dataset_split.json
 
-     N_CLASSES_NEW = 36
-     THING_IDS = [23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
+  ---
+  Phase 2: 训练层修改
 
-     CLASS_NAMES_NEW = [
-         "outside_body", "inside_body_empty", "liver", "spleen", "stomach",
-         "pancreas", "gallbladder", "urinary_bladder", "prostate", "heart",
-         "brain", "thyroid_gland", "spinal_cord", "lung", "esophagus",
-         "trachea", "small_bowel", "duodenum", "colon", "spine",
-         "skull", "sternum", "costal_cartilages",
-         # Thing classes
-         "kidney", "adrenal_gland", "rib", "scapula", "clavicula",
-         "humerus", "hip", "femur", "gluteus_maximus", "gluteus_medius",
-         "gluteus_minimus", "autochthon", "iliopsoas",
-     ]
+  2.1 修改 scripts/body/train.py
 
-     def create_label_mapping():
-         """创建72→36的查找表"""
-         semantic_lut = np.zeros(72, dtype=np.uint8)
-         instance_lut = np.zeros(72, dtype=np.uint8)
-         # ... 实现映射逻辑 ...
-         return semantic_lut, instance_lut
+  # 旧
+  body_n_classes = 36
+  class_weight[0] = 0.0   # outside_body
+  class_weight[1] = 0.05  # inside_body_empty
 
-     def remap_labels(voxel_labels_72):
-         """转换标签"""
-         semantic_lut, instance_lut = create_label_mapping()
-         return semantic_lut[voxel_labels_72], instance_lut[voxel_labels_72]
+  # 新
+  body_n_classes = 35
+  class_weight[0] = 0.1   # inside_body_empty (对应 KITTI empty)
+  class_weight[-1] = 0.1  # dustbin
+  # 其他 organs 保持 1.0
 
-     Step 2: 更新params.py
+  2.2 修改 compl_labelweights
 
-     文件: pasco/data/body/params.py (修改)
+  # 旧
+  compl_labelweights[0] = 0.0  # outside_body
+  compl_labelweights[1] = compl_labelweights[1] * 0.1
 
-     - 导入新的映射配置
-     - 设置 thing_ids = THING_IDS
-     - 设置 n_classes = 36
-     - 更新 class_names = CLASS_NAMES_NEW
-     - 重新计算类别频率
+  # 新
+  # class_frequencies 已经不包含 outside_body
+  # inside_body_empty (新 class 0) 保持正常计算
 
-     Step 3: 更新数据预处理脚本
+  ---
+  Phase 3: 模型层修改
 
-     文件: scripts/body/data/data_pre_process.py (修改)
+  3.1 修改 pasco/models/decoder_v3.py
 
-     - 使用 remap_labels() 转换标签
-     - 在NPZ中保存 instance_label 字段
-     - 使用 n_classes=36 生成多尺度标签
+  # 旧: predict_completion_sem_logit()
+  keep = sem_class != 0  # 移除 outside_body
 
-     Step 4: 更新Dataset
+  # 新: 
+  keep = sem_class != 255  # 移除 ignore label (如果有的话)
+  # 或者不需要修改，因为 class 0 现在是 inside_body_empty
 
-     文件: pasco/data/body/body_dataset.py (修改)
+  3.2 检查 pasco/models/helper.py
 
-     主要修改:
-     1. 添加 prepare_instance_target() 方法
-     2. 修改 _prepare_mask_label() 支持thing/stuff分离
-     3. 加载instance_label从预计算数据
+  - panoptic_inference(): 确认 labels.ne(0) 逻辑是否需要更新
 
-     def _prepare_mask_label(self, semantic_label, instance_label):
-         # 1. 为stuff类创建语义mask
-         stuff_masks = self.prepare_target(semantic_label, ignore_labels=[0])
-         stuff_filtered = [(l, m) for l, m in zip(...) if l not in self.thing_ids]
+  ---
+  Phase 4: 评估层修改
 
-         # 2. 为thing类创建实例mask
-         thing_masks = self.prepare_instance_target(semantic_label, instance_label)
+  4.1 修改评估指标
 
-         # 3. 合并返回
-         return {"labels": [...], "masks": [...]}
+  - 确保 IoU 计算忽略 255 (ignore label)
+  - PQ 计算不包含移除的类别
 
-     Step 5: 重新预计算数据
+  ---
+  重要补充点
 
-     # 删除旧的预计算数据
-     rm -rf Dataset/voxel_data_precomputed/*
+  补充 1: Instance 处理确认
 
-     # 重新运行预处理
-     python scripts/body/data/data_pre_process.py \
-         --dataset_root Dataset/voxel_data \
-         --output_root Dataset/voxel_data_precomputed \
-         --num_workers 8
+  当前 All-Instance Strategy 已正确实现：
+  - Single-instance organs (class 1-21 → 新 0-20): 每个语义类 = 1 个 instance
+  - Multi-instance organs (class 22-34 → 新 21-33): 每个 (语义, instance_id) = 1 个 instance
+  - 例：每根肋骨语义类相同 (rib)，但 instance_id 不同
 
-     ---
-     关键文件清单
-     ┌───────────────────────────────────────┬──────┬──────────────────────────┐
-     │                 文件                  │ 操作 │           说明           │
-     ├───────────────────────────────────────┼──────┼──────────────────────────┤
-     │ pasco/data/body/label_mapping.py      │ 新建 │ 标签映射逻辑             │
-     ├───────────────────────────────────────┼──────┼──────────────────────────┤
-     │ pasco/data/body/params.py             │ 修改 │ 配置thing_ids, n_classes │
-     ├───────────────────────────────────────┼──────┼──────────────────────────┤
-     │ pasco/data/body/body_dataset.py       │ 修改 │ 实例mask生成             │
-     ├───────────────────────────────────────┼──────┼──────────────────────────┤
-     │ scripts/body/data/data_pre_process.py │ 修改 │ 预计算添加instance_label │
-     └───────────────────────────────────────┴──────┴──────────────────────────┘
-     ---
-     验证方法
+  补充 2: 稀疏卷积行为
 
-     1. 单元测试: 验证label_mapping正确性
-     # 测试所有72个类都有映射
-     semantic_lut, instance_lut = create_label_mapping()
-     assert semantic_lut.max() == 35
-     assert len(np.unique(semantic_lut)) == 36
-     2. 数据检查: 验证预计算数据
-     data = np.load("sample.npz")
-     assert "instance_label" in data
-     assert data["semantic_label"].max() <= 35
-     3. 训练测试: 运行短训练验证
-     python scripts/body/train.py --check --use_precomputed
-     # 应显示 n_classes: 36, thing_ids: [23, 24, ...]
-     4. 指标验证: PQ指标不再全为0
-       - Things PQ/SQ/RQ 应该有非零值
-       - 实例分割开始工作
+  - Decoder pruning 会移除预测为非器官的位置
+  - 移除 class 0 后，pruning 条件需要更新为移除 inside_body_empty 或保留所有预测
 
-     ---
-     预期效果
-     ┌─────────────────┬─────────────────────┬─────────────────────┐
-     │      指标       │ 当前 (72类, 无实例) │ 预期 (36类, 有实例) │
-     ├─────────────────┼─────────────────────┼─────────────────────┤
-     │ 语义类数        │ 72                  │ 36                  │
-     ├─────────────────┼─────────────────────┼─────────────────────┤
-     │ Thing类数       │ 0                   │ 14                  │
-     ├─────────────────┼─────────────────────┼─────────────────────┤
-     │ 最大实例数/样本 │ 0                   │ 50                  │
-     ├─────────────────┼─────────────────────┼─────────────────────┤
-     │ Query利用率     │ 0%                  │ ~50%                │
-     ├─────────────────┼─────────────────────┼─────────────────────┤
-     │ Things PQ       │ 0.0                 │ >0                  │
-     ├─────────────────┼─────────────────────┼─────────────────────┤
-     │ mIoU            │ ~7%                 │ 预期提升            │
-     └─────────────────┴─────────────────────┴─────────────────────┘
+  补充 3: 数据边界处理
+
+  - _normalize_grid_size() 中 padding 填充值改为 255
+  - 这确保超出原始数据范围的区域被忽略
+
+  补充 4: Loss 计算
+
+  - CrossEntropy 使用 ignore_index=255
+  - 确保 255 不参与 loss 计算
+
+  ---
+  执行顺序
+
+  1. label_mapping.py (核心映射逻辑)
+         ↓
+  2. params.py (参数更新)
+         ↓
+  3. body_dataset.py (数据加载适配)
+         ↓
+  4. 运行 data_pre_process.py (重新生成预处理数据)
+         ↓
+  5. train.py (训练参数更新)
+         ↓
+  6. decoder_v3.py / helper.py (模型逻辑检查)
+         ↓
+  7. 测试训练流程

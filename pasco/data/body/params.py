@@ -2,26 +2,48 @@
 Body task parameters for panoptic segmentation.
 
 This module defines:
-- 36 semantic classes (merged from original 72)
-- 14 thing classes with instance segmentation
+- 35 semantic classes (merged from original 72, outside_body removed)
+- All-Instance Strategy: All 34 organ classes (1-34) are treated as instances
 - Class frequencies for loss weighting
+
+All-Instance Strategy:
+- outside_body: mapped to 255 (IGNORE_LABEL), not in model output
+- Class 0 (inside_body_empty): Low weight background class
+- Classes 1-34 (organs): All treated as instances (each query predicts one organ)
+- Total ~69 instances per sample
+- Recommended num_queries: 350-400
 """
 import numpy as np
 
 from .label_mapping import (
     N_CLASSES_NEW,
+    IGNORE_LABEL,
     THING_IDS,
+    SINGLE_INSTANCE_IDS,
+    MULTI_INSTANCE_IDS,
     CLASS_NAMES_NEW,
     compute_new_class_frequencies,
+    get_total_instances_per_sample,
 )
 
 # Thing class IDs (have instance segmentation)
-# kidney, adrenal_gland, rib, scapula, clavicula, humerus, hip, femur,
-# gluteus_maximus, gluteus_medius, gluteus_minimus, autochthon, iliopsoas
+# All organ classes (1-34) are thing classes
 thing_ids = THING_IDS
 
-# Number of classes
-n_classes = N_CLASSES_NEW  # 36
+# Single-instance organ IDs (liver, heart, etc.)
+single_instance_ids = SINGLE_INSTANCE_IDS
+
+# Multi-instance organ IDs (kidney, rib, etc.)
+multi_instance_ids = MULTI_INSTANCE_IDS
+
+# Total instances per sample
+total_instances = get_total_instances_per_sample()
+
+# Number of classes (35, outside_body removed)
+n_classes = N_CLASSES_NEW  # 35
+
+# Ignore label for outside_body
+ignore_label = IGNORE_LABEL  # 255
 
 # Class names
 class_names = CLASS_NAMES_NEW
@@ -119,12 +141,23 @@ class_frequencies = {
 
 def print_class_info():
     """Print class information for debugging."""
+    print(f"=== All-Instance Strategy (35 classes) ===")
     print(f"Number of classes: {n_classes}")
-    print(f"Thing class IDs: {thing_ids}")
-    print(f"\nClass frequencies (36 classes):")
+    print(f"Ignore label (outside_body): {ignore_label}")
+    print(f"Thing class IDs (all organs): {len(thing_ids)} classes")
+    print(f"  - Single-instance organs: {len(single_instance_ids)}")
+    print(f"  - Multi-instance organs: {len(multi_instance_ids)}")
+    print(f"Total instances per sample: {total_instances}")
+    print(f"Recommended num_queries: {int(total_instances * 5)}")
+    print(f"\nClass frequencies (35 classes):")
     for i, (name, count) in enumerate(zip(class_names, _counts_1_1)):
-        thing_marker = " [THING]" if i in thing_ids else ""
-        print(f"  {i:2d}: {name:25s} {count:15.0f}{thing_marker}")
+        if i == 0:
+            marker = " [LOW WEIGHT BG]"
+        elif i in thing_ids:
+            marker = " [INSTANCE]"
+        else:
+            marker = ""
+        print(f"  {i:2d}: {name:25s} {count:15.0f}{marker}")
 
 
 if __name__ == "__main__":

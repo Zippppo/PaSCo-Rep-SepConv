@@ -3,7 +3,7 @@
 Training script for body scene completion task.
 
 Usage:
-    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json --gpuids 1 --use_precomputed --bs 32 --max_epochs 100 --exp_prefix body_instance
+    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json --gpuids 1 --use_precomputed --bs 16 --max_epochs 100 --exp_prefix body_full_instance --num_queries 200
 """
 
 import os
@@ -21,7 +21,7 @@ from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.plugins.environments import SLURMEnvironment
 
 from pasco.data.body.body_dm import BodyDataModule
-from pasco.data.body.params import class_names, class_frequencies, thing_ids, n_classes
+from pasco.data.body.params import class_names, class_frequencies, thing_ids, n_classes, ignore_label
 from pasco.models.net_panoptic_sparse import Net
 from pasco.utils.torch_util import set_random_seed
 
@@ -180,7 +180,7 @@ class MetricsLogger(Callback):
 @click.option('--transformer_dec_layers', default=1, help='Transformer decoder layer')
 
 @click.option('--num_queries', default=100, help='Number of queries')
-@click.option('--mask_weight', default=40.0, help='mask weight')
+@click.option('--mask_weight', default=20.0, help='mask weight (reduced from 40.0 to balance with ce_weight)')
 @click.option('--occ_weight', default=1.0, help='occupancy loss weight')
 
 @click.option('--use_se_layer', default=False, help='use SE layer')
@@ -194,6 +194,7 @@ class MetricsLogger(Callback):
 @click.option('--f', default=64, help='base feature dimension')
 @click.option('--seed', default=42, help='random seed')
 @click.option('--max_epochs', default=60, help='maximum epochs')
+@click.option('--warmup_epochs', default=10, help='Epochs without class-based pruning (warmup)')
 @click.option('--check', is_flag=True, help='just check model initialization')
 @click.option('--use_precomputed', is_flag=True, help='Use precomputed multiscale labels for faster loading')
 @click.option('--precomputed_dir', default="", help='Path to precomputed data directory (default: {dataset_root}_precomputed)')
@@ -208,7 +209,7 @@ def main(
     seed,
     transformer_dec_layers, transformer_enc_layers, n_infers, occ_weight,
     num_queries, use_se_layer, accum_batch, pretrained_model,
-    dataset_root, split_file, f, max_epochs, check,
+    dataset_root, split_file, f, max_epochs, warmup_epochs, check,
     use_precomputed, precomputed_dir
 ):
     set_random_seed(seed)
@@ -241,10 +242,10 @@ def main(
     n_gpus = len(gpu_list)
 
     # Body-specific parameters (imported from params.py)
-    body_n_classes = n_classes  # 36 semantic classes
+    body_n_classes = n_classes  # 35 semantic classes (outside_body removed, uses ignore_label=255)
     body_in_channels = 38  # xyz(3) + xyz_rel(3) + pos_enc(32)
     body_scene_size = (128, 128, 256)
-    body_thing_ids = thing_ids  # 13 thing classes for instance segmentation
+    body_thing_ids = thing_ids  # 34 thing classes for instance segmentation (1-34)
 
     encoder_dropouts = [point_dropout_ratio, 0.0, 0.0, 0.0, 0.0, 0.0]
     decoder_dropouts = [0.0, 0.0, 0.0, 0.0, 0.0]
@@ -260,22 +261,39 @@ def main(
         exp_name += "_noHeavyDecoder"
 
     logger.info("Experiment: %s", exp_name)
+    logger.info("Warmup epochs (no class-based pruning): %d", warmup_epochs)
 
     query_sample_ratio = 1.0
 
-    # Class weights
+    # Class weights for All-Instance Strategy (35 classes)
+    # - outside_body: mapped to 255 (IGNORE_LABEL), handled by ignore_index in loss
+    # - Class 0 (inside_body_empty): Low weight background (like KITTI empty)
+    # - Classes 1-34 (organs): Normal weight (all are instances now)
+    # - Dustbin class: Moderate weight to provide gradient for unmatched queries
     class_weights = []
     for _ in range(n_infers):
         class_weight = torch.ones(body_n_classes + 1)
-        class_weight[0] = 0.1  # outside_body - reduce weight
-        class_weight[1] = 0.1  # inside_body_empty - reduce weight
-        class_weight[-1] = 0.1  # dustbin class
+        class_weight[0] = 0.1   # inside_body_empty - low weight (similar to KITTI empty)
+        class_weight[-1] = 0.5  # dustbin class - increased from 0.1 to 0.5 to break "dead loop"
+        # All organ classes (1-34) keep weight 1.0
         class_weights.append(class_weight)
 
+    logger.info("All-Instance Strategy class weights (35 classes):")
+    logger.info("  IGNORE_LABEL=255 (outside_body): handled by ignore_index")
+    logger.info("  Class 0 (inside_body_empty): %.2f", class_weight[0].item())
+    logger.info("  Classes 1-34 (organs): 1.0")
+    logger.info("  Dustbin class: %.2f", class_weight[-1].item())
+
     # Completion label weights (inverse frequency)
-    complt_num_per_class = class_frequencies["1_1"]
+    # class_frequencies already excludes outside_body (35 classes now)
+    # outside_body (255) is handled by ignore_index in loss function
+    complt_num_per_class = class_frequencies["1_1"].copy()
+    # Avoid division by zero
+    complt_num_per_class[complt_num_per_class == 0] = 1.0
     compl_labelweights = complt_num_per_class / np.sum(complt_num_per_class)
     compl_labelweights = np.power(np.amax(compl_labelweights) / compl_labelweights, 1 / 3.0)
+    # Set inside_body_empty (class 0) to low weight
+    compl_labelweights[0] = compl_labelweights[0] * 0.1
     compl_labelweights = torch.from_numpy(compl_labelweights).float()
 
     # Determine and validate precomputed directory
@@ -335,14 +353,19 @@ def main(
         f=f,
         compl_labelweights=compl_labelweights,
         use_voxel_query_loss=use_voxel_query_loss,
+        warmup_epochs=warmup_epochs,
     )
 
     if check:
         logger.info("Model initialized successfully!")
+        logger.info("=== All-Instance Strategy (35 classes) ===")
         logger.info("  n_classes: %d", body_n_classes)
+        logger.info("  ignore_label: %d (outside_body)", ignore_label)
         logger.info("  in_channels: %d", body_in_channels)
         logger.info("  scene_size: %s", body_scene_size)
-        logger.info("  thing_ids: %s", body_thing_ids)
+        logger.info("  num_queries: %d", num_queries)
+        logger.info("  thing_ids: %d classes (all organs 1-34)", len(body_thing_ids))
+        logger.info("  Expected instances/sample: ~69")
         return
 
     # Logger and callbacks
@@ -389,6 +412,7 @@ def main(
     config = {
         'lr': lr, 'wd': wd, 'bs': bs, 'scale': scale, 'alpha': alpha,
         'n_infers': n_infers, 'num_queries': num_queries, 'max_epochs': max_epochs,
+        'warmup_epochs': warmup_epochs,
         'transformer_dropout': transformer_dropout, 'net_3d_dropout': net_3d_dropout,
         'mask_weight': mask_weight, 'occ_weight': occ_weight,
         'pretrained_model': pretrained_model, 'seed': seed,

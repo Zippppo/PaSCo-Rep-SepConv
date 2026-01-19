@@ -6,8 +6,8 @@ import numpy as np
 import torch.nn.functional as F
 
 from .positional_encoding import sinusoidal_positional_encoding, normalize_coordinates
-from .params import thing_ids, n_classes
-from .label_mapping import remap_labels, N_CLASSES_OLD
+from .params import thing_ids, single_instance_ids, multi_instance_ids, n_classes, ignore_label
+from .label_mapping import remap_labels, N_CLASSES_OLD, IGNORE_LABEL
 
 
 class BodyDataset(Dataset):
@@ -56,6 +56,8 @@ class BodyDataset(Dataset):
         self.voxel_size = voxel_size
         self.n_classes = n_classes
         self.thing_ids = thing_ids
+        self.single_instance_ids = single_instance_ids
+        self.multi_instance_ids = multi_instance_ids
 
         # Precomputed labels configuration
         self.use_precomputed = use_precomputed
@@ -224,12 +226,16 @@ class BodyDataset(Dataset):
         Returns:
             normalized_labels: [TD, TH, TW] normalized labels
             pc_offset: [3] offset to apply to point cloud (in mm)
+
+        Note:
+            Padding is filled with IGNORE_LABEL (255) to ensure regions
+            outside the original data are ignored in loss computation.
         """
         D, H, W = labels.shape
         TD, TH, TW = self.target_size
 
-        # Create result array filled with class 0 (outside_body)
-        result = np.zeros((TD, TH, TW), dtype=labels.dtype)
+        # Create result array filled with IGNORE_LABEL (255) for padding
+        result = np.full((TD, TH, TW), IGNORE_LABEL, dtype=labels.dtype)
 
         # Compute center alignment offsets
         d_off = (TD - D) // 2
@@ -322,14 +328,20 @@ class BodyDataset(Dataset):
 
     def _prepare_mask_label(self, semantic_label, instance_label):
         """
-        Prepare mask labels for panoptic segmentation.
+        Prepare mask labels for panoptic segmentation (All-Instance Strategy).
 
-        For stuff classes (not in thing_ids): one binary mask per unique class
-        For thing classes (in thing_ids): one binary mask per unique instance
+        All-Instance Strategy (35 classes):
+        - Class 255 (IGNORE_LABEL): SKIPPED (padding/outside_body, ignored in loss)
+        - Class 0 (inside_body_empty): SKIPPED (low weight background in loss)
+        - Classes 1-21 (single-instance organs): one mask per semantic class
+        - Classes 22-34 (multi-instance organs): one mask per unique instance
+
+        This ensures every organ is treated as an instance, maximizing
+        the utilization of Mask2Former's query mechanism.
 
         Args:
-            semantic_label: [D, H, W] semantic labels (0-35)
-            instance_label: [D, H, W] instance IDs (0 for stuff, >0 for things)
+            semantic_label: [D, H, W] semantic labels (0-34 or 255)
+            instance_label: [D, H, W] instance IDs (0 for background, >0 for organs)
 
         Returns:
             dict with "labels" and "masks"
@@ -337,31 +349,32 @@ class BodyDataset(Dataset):
         all_labels = []
         all_masks = []
 
-        # 1. Handle stuff classes (not in thing_ids)
-        unique_sem_ids = torch.unique(semantic_label)
-        for sem_id in unique_sem_ids:
-            sem_id_val = sem_id.item()
-            # Skip background (class 0) and thing classes
-            if sem_id_val == 0 or sem_id_val in self.thing_ids:
-                continue
+        # 1. Handle single-instance organs (classes 2-22)
+        # Each semantic class is one instance mask
+        for sem_id in self.single_instance_ids:
             mask = semantic_label == sem_id
-            all_labels.append(sem_id)
-            all_masks.append(mask)
+            if mask.any():
+                all_labels.append(sem_id)
+                all_masks.append(mask)
 
-        # 2. Handle thing classes (in thing_ids) - one mask per instance
-        unique_inst_ids = torch.unique(instance_label)
-        for inst_id in unique_inst_ids:
-            inst_id_val = inst_id.item()
-            if inst_id_val == 0:  # Skip non-instance voxels
+        # 2. Handle multi-instance organs (classes 23-35)
+        # Each unique (semantic_id, instance_id) pair is one mask
+        for sem_id in self.multi_instance_ids:
+            sem_mask = semantic_label == sem_id
+            if not sem_mask.any():
                 continue
-            inst_mask = instance_label == inst_id
-            # Get the semantic class for this instance
-            # All voxels with this instance ID should have the same semantic class
-            sem_at_inst = semantic_label[inst_mask]
-            if len(sem_at_inst) > 0:
-                sem_id = sem_at_inst[0]  # Take first (all should be same)
-                # Only add if it's actually a thing class
-                if sem_id.item() in self.thing_ids:
+
+            # Get unique instance IDs for this semantic class
+            inst_ids_at_sem = instance_label[sem_mask]
+            unique_inst_ids = torch.unique(inst_ids_at_sem)
+
+            for inst_id in unique_inst_ids:
+                inst_id_val = inst_id.item()
+                if inst_id_val == 0:  # Skip if no instance ID
+                    continue
+                # Create mask for this specific instance
+                inst_mask = (semantic_label == sem_id) & (instance_label == inst_id)
+                if inst_mask.any():
                     all_labels.append(sem_id)
                     all_masks.append(inst_mask)
 
@@ -373,7 +386,7 @@ class BodyDataset(Dataset):
             }
 
         masks = torch.stack(all_masks)
-        labels = torch.tensor([l.item() if torch.is_tensor(l) else l for l in all_labels], dtype=torch.long)
+        labels = torch.tensor(all_labels, dtype=torch.long)
 
         return {
             "labels": labels,
@@ -420,32 +433,43 @@ class BodyDataset(Dataset):
         Generate multi-scale geometric and semantic labels.
 
         Args:
-            semantic_label: [D, H, W] semantic labels
+            semantic_label: [D, H, W] semantic labels (0-34 or 255)
 
         Returns:
             geo_labels: dict with "1_1", "1_2", "1_4" keys
             sem_labels: dict with "1_1", "1_2", "1_4" keys
+
+        Note:
+            - Class 255 (IGNORE_LABEL): outside_body/padding, ignored
+            - Class 0 (inside_body_empty): empty space inside body
+            - Classes 1-34: organ classes (occupied)
         """
-        # Compute occupancy: class > 0 means occupied
-        # Class 0 = outside_body, Class 1 = inside_body_empty
+        # Compute occupancy: class >= 1 means occupied (organs)
+        # Class 0 = inside_body_empty, Class 255 = IGNORE (padding/outside)
         # Both are "empty" for geometric occupancy
         complete_voxel = semantic_label.clone().float()
-        complete_voxel[semantic_label > 1] = 1  # Only actual organs are occupied
-        complete_voxel[semantic_label <= 1] = 0
+        complete_voxel[semantic_label >= 1] = 1  # Only actual organs are occupied
+        complete_voxel[semantic_label == 0] = 0  # inside_body_empty
+        complete_voxel[semantic_label == IGNORE_LABEL] = 0  # padding/outside
 
         scales = [1, 2, 4]
         geo_labels = {}
         sem_labels = {}
 
         # One-hot encoding for semantic labels
-        # Map labels to range [0, n_classes]
+        # Map IGNORE_LABEL (255) to a temporary valid index for one-hot encoding
         temp = semantic_label.clone().long()
+        # Replace 255 with 0 temporarily for one-hot (will handle separately)
+        temp[temp == IGNORE_LABEL] = 0
         sem_label_oh = F.one_hot(temp, num_classes=self.n_classes).permute(3, 0, 1, 2).float()
+
+        # Create a mask for IGNORE regions
+        ignore_mask = (semantic_label == IGNORE_LABEL)
 
         for scale in scales:
             if scale == 1:
                 downscaled_geo = complete_voxel
-                downscaled_sem = semantic_label
+                downscaled_sem = semantic_label.clone()
             else:
                 # Geometric: max pooling
                 downscaled_geo = F.max_pool3d(
@@ -455,10 +479,9 @@ class BodyDataset(Dataset):
                 ).squeeze(0).squeeze(0)
 
                 # Semantic: average pooling then argmax
-                # Only consider non-empty classes for voting
+                # Only consider organ classes for voting (classes 1-34)
                 sem_label_oh_occ = sem_label_oh.clone()
-                sem_label_oh_occ[0, :, :, :] = 0  # Exclude outside_body
-                sem_label_oh_occ[1, :, :, :] = 0  # Exclude inside_body_empty
+                sem_label_oh_occ[0, :, :, :] = 0  # Exclude inside_body_empty from voting
 
                 downscaled_sem_oh = F.avg_pool3d(
                     sem_label_oh_occ.unsqueeze(0),
@@ -471,21 +494,24 @@ class BodyDataset(Dataset):
                 # Handle empty voxels (where all organ channels were 0)
                 # Check if any organ was present
                 has_organ = downscaled_sem_oh.sum(dim=0) > 0
-                # For empty voxels, use original class 0 or 1
-                sem_label_oh_empty = sem_label_oh.clone()
-                sem_label_oh_empty[2:, :, :, :] = 0  # Only keep classes 0 and 1
-                downscaled_empty = F.avg_pool3d(
-                    sem_label_oh_empty.unsqueeze(0),
+
+                # For empty voxels, determine if they should be inside_body_empty (0) or IGNORE (255)
+                # Downsample the ignore mask to check proportion of ignored voxels
+                ignore_mask_float = ignore_mask.float().unsqueeze(0).unsqueeze(0)
+                downscaled_ignore = F.avg_pool3d(
+                    ignore_mask_float,
                     kernel_size=scale,
                     stride=scale,
-                ).squeeze(0)
-                # Handle case where both class 0 and 1 are 0 (shouldn't happen but be safe)
-                # When sum is 0, default to class 0 (outside_body)
-                has_empty_class = downscaled_empty.sum(dim=0) > 0
-                downscaled_empty_label = torch.argmax(downscaled_empty, dim=0)
-                # Default to 0 for completely empty regions
-                downscaled_empty_label[~has_empty_class] = 0
-                downscaled_sem[~has_organ] = downscaled_empty_label[~has_organ]
+                ).squeeze(0).squeeze(0)
+
+                # If more than half of the original voxels were IGNORE, keep as IGNORE
+                # Otherwise, use inside_body_empty (class 0)
+                mostly_ignore = downscaled_ignore > 0.5
+
+                # Default empty regions to inside_body_empty (0)
+                downscaled_sem[~has_organ] = 0
+                # Override with IGNORE_LABEL where mostly ignored
+                downscaled_sem[~has_organ & mostly_ignore] = IGNORE_LABEL
 
             geo_labels[f"1_{scale}"] = downscaled_geo.type(torch.uint8)
             sem_labels[f"1_{scale}"] = downscaled_sem.type(torch.uint8)
