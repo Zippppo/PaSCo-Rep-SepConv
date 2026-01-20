@@ -206,7 +206,7 @@ class SetCriterion(nn.Module):
             ssc_lovasz_loss += lovasz_softmax_flat(
                 ssc_logit_sparse_F,
                 semantic_label_sparse,
-                ignores=[0],  # ignore empty space
+                ignores=[255],  # ignore label 255 (outside_body/ignore)
                 classes="present",
             )
 

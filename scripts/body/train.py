@@ -3,7 +3,7 @@
 Training script for body scene completion task.
 
 Usage:
-    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json --gpuids 1 --use_precomputed --bs 32 --max_epochs 100 --exp_prefix body_instance
+    python scripts/body/train.py --dataset_root Dataset/voxel_data --split_file dataset_split.json --gpuids 1 --use_precomputed --bs 8 --max_epochs 100 --exp_prefix body_instance
 """
 
 import os
@@ -267,8 +267,8 @@ def main(
     class_weights = []
     for _ in range(n_infers):
         class_weight = torch.ones(body_n_classes + 1)
-        class_weight[0] = 0.1  # outside_body - reduce weight
-        class_weight[1] = 0.1  # inside_body_empty - reduce weight
+        class_weight[0] = 0.1  # inside_body_empty - reduce weight (now class 0)
+        # Note: outside_body is now 255 (ignore), no weight needed
         class_weight[-1] = 0.1  # dustbin class
         class_weights.append(class_weight)
 

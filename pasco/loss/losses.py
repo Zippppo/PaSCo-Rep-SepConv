@@ -14,8 +14,8 @@ def CE_ssc_loss(pred_F, target_sparse, class_weight):
 
     criterion = nn.CrossEntropyLoss(
         weight=class_weight.type_as(pred_F),
-        ignore_index=0,
-        reduction="mean",  # NOTE: ignore empty class
+        ignore_index=255,
+        reduction="mean",  # NOTE: ignore label 255 (outside_body/ignore)
     )
 
     loss = criterion(pred_F, target_sparse.long())

@@ -1,15 +1,16 @@
 # Body Scene Completion Configuration
 # Adapted from PaSCo for human body organ segmentation
-# Updated for 36-class panoptic segmentation (72->36 class mapping with instances)
+# Updated for 71-class full instance segmentation (72->71 class mapping, all classes as thing)
+# Note: outside_body is removed (mapped to 255/ignore)
 
 dataset: body
-n_classes: 36  # 36 semantic classes (merged from original 72)
+n_classes: 71  # 71 semantic classes (from original 72, outside_body removed, no merging)
 scene_size: [128, 128, 256]  # [D, H, W] in voxels
 in_channels: 38  # xyz(3) + xyz_rel(3) + pos_enc(32)
 n_infers: 1  # MVP - single inference
 num_queries: 100
 voxel_size: 4  # mm
-thing_ids: [23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]  # 13 thing classes with instances
+thing_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70]  # All 71 classes are thing classes
 
 # Training parameters
 lr: 0.0003

@@ -59,7 +59,8 @@ def normalize_grid_size(labels, grid_world_min, target_size=(128, 128, 256), vox
     D, H, W = labels.shape
     TD, TH, TW = target_size
 
-    result = np.zeros((TD, TH, TW), dtype=labels.dtype)
+    # Create result array filled with 255 (ignore/outside_body)
+    result = np.full((TD, TH, TW), 255, dtype=labels.dtype)
 
     d_off = (TD - D) // 2
     h_off = (TH - H) // 2
@@ -139,7 +140,8 @@ def validate_data(original_data, precomputed_data, target_size=(128, 128, 256)):
 
     # Step 3: Validate geo_labels (occupancy)
     semantic = precomputed_data['semantic_label']
-    expected_geo = (semantic > 1).astype(np.uint8)
+    # Organs are class > 0 and not 255
+    expected_geo = ((semantic > 0) & (semantic != 255)).astype(np.uint8)
 
     if np.array_equal(expected_geo, precomputed_data['geo_1_1']):
         logger.info("✓ geo_1_1 is correct (organs = 1, empty = 0)")
@@ -285,7 +287,8 @@ def create_voxel_mesh(voxel_data, voxel_size=4.0, downsample=1, is_geo=False):
     if is_geo:
         occupied_mask = voxel_data > 0
     else:
-        occupied_mask = voxel_data > 1  # Exclude outside_body and inside_body_empty
+        # Exclude inside_body_empty (class 0) and ignore (255)
+        occupied_mask = (voxel_data > 0) & (voxel_data != 255)
 
     # Get coordinates
     coords = np.argwhere(occupied_mask)

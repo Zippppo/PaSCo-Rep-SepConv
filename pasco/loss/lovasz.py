@@ -216,6 +216,10 @@ def lovasz_softmax_flat(logits, labels, classes="present", ignores=[255]):
         perm = perm.data
         fg_sorted = fg[perm]
         losses.append(torch.dot(errors_sorted, Variable(lovasz_grad(fg_sorted))))
+
+    # Return tensor 0.0 if no valid classes found (instead of int 0)
+    if len(losses) == 0:
+        return torch.tensor(0.0, device=logits.device, requires_grad=True)
     return mean(losses)
 
 
@@ -320,7 +324,7 @@ def hinge_jaccard_loss(
             losses.append(1 - TP / (TP + FP + FN))
 
     if len(losses) == 0:
-        return 0
+        return torch.tensor(0.0, device=vprobas.device, requires_grad=True)
     return mean(losses)
 
 

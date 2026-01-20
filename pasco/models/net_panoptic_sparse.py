@@ -786,6 +786,10 @@ class Net(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         self.step_inference(batch, "val", eval=True)
+        # Clear GPU memory after each validation step to prevent OOM
+        # This is especially important for Body task with large scene size (128, 128, 256)
+        if batch_idx % 10 == 0:
+            torch.cuda.empty_cache()
 
     def test_step(self, batch, batch_idx):
         self.step_inference(batch, "test", eval=True, measure_time=True)

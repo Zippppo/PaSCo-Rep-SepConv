@@ -2,9 +2,12 @@
 Body task parameters for panoptic segmentation.
 
 This module defines:
-- 36 semantic classes (merged from original 72)
-- 14 thing classes with instance segmentation
+- 71 semantic classes (from original 72, with outside_body removed, no merging)
+- All 71 classes are thing classes with instance segmentation (instance_id=1)
 - Class frequencies for loss weighting
+
+Note: Original class 0 (outside_body) is mapped to 255 (ignore),
+      All other classes 1-71 are mapped to 0-70 with instance_id=1.
 """
 import numpy as np
 
@@ -15,19 +18,18 @@ from .label_mapping import (
     compute_new_class_frequencies,
 )
 
-# Thing class IDs (have instance segmentation)
-# kidney, adrenal_gland, rib, scapula, clavicula, humerus, hip, femur,
-# gluteus_maximus, gluteus_medius, gluteus_minimus, autochthon, iliopsoas
+# Thing class IDs (all 71 classes have instance segmentation)
 thing_ids = THING_IDS
 
 # Number of classes
-n_classes = N_CLASSES_NEW  # 36
+n_classes = N_CLASSES_NEW  # 71
 
 # Class names
 class_names = CLASS_NAMES_NEW
 
 # Original 72-class counts (from dataset_statistics.json)
-# Used to compute aggregated frequencies for new 36-class scheme
+# Used to compute frequencies for new 71-class scheme
+# Note: original class 0 (outside_body) count is not included in the new frequencies
 _counts_72_classes = np.array([
     1835148880,  # 0: outside_body
     1305194053,  # 1: inside_body_empty
@@ -103,7 +105,7 @@ _counts_72_classes = np.array([
     0,           # 71: rectum (no samples in current dataset)
 ], dtype=np.float64)
 
-# Compute aggregated class frequencies for 36-class scheme
+# Compute class frequencies for 71-class scheme (simple 1:1 mapping)
 _counts_1_1 = compute_new_class_frequencies(_counts_72_classes)
 
 # Avoid zero frequency (add small epsilon)
@@ -120,8 +122,8 @@ class_frequencies = {
 def print_class_info():
     """Print class information for debugging."""
     print(f"Number of classes: {n_classes}")
-    print(f"Thing class IDs: {thing_ids}")
-    print(f"\nClass frequencies (36 classes):")
+    print(f"Number of thing classes: {len(thing_ids)} (all classes are thing classes)")
+    print(f"\nClass frequencies (71 classes, outside_body excluded):")
     for i, (name, count) in enumerate(zip(class_names, _counts_1_1)):
         thing_marker = " [THING]" if i in thing_ids else ""
         print(f"  {i:2d}: {name:25s} {count:15.0f}{thing_marker}")

@@ -1,152 +1,179 @@
 """
 Label mapping for body instance segmentation.
 
-Maps 72 original classes to 36 semantic classes + instance IDs.
-This enables panoptic segmentation by:
-- Merging left/right paired organs into single semantic class with 2 instances
-- Merging 24 individual ribs into single "rib" class with 24 instances
+Full 71-class scheme: Maps 72 original classes to 71 semantic classes.
+Class 0 (outside_body) is removed and mapped to 255 (ignore).
+All 71 remaining classes are treated as "thing" classes with instance_id=1.
 
-Instance ID format: simple sequential (1, 2, 3, ...)
-- Left organs/structures get instance ID 1
-- Right organs/structures get instance ID 2
-- Ribs: left 1-12 get IDs 1-12, right 1-12 get IDs 13-24
+This is a direct 1:1 mapping with no class merging:
+- Original class 0 (outside_body) → 255 (ignore)
+- Original class 1-71 → new class 0-70 (each with instance_id=1)
+
+All classes are instance-aware (thing classes), enabling full panoptic segmentation.
 """
 import numpy as np
 from typing import Tuple
 
 # Number of classes
 N_CLASSES_OLD = 72
-N_CLASSES_NEW = 36
+N_CLASSES_NEW = 71  # 71 classes (outside_body removed, no merging)
 
 # Thing class IDs (have instance segmentation)
-# These are the new semantic IDs for classes that will have instances
-THING_IDS = [23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
+# All 71 classes are thing classes (each has instance_id=1)
+THING_IDS = list(range(71))  # [0, 1, 2, ..., 70]
 
-# New class names (36 classes)
+# New class names (71 classes, outside_body removed, direct mapping from datainfo.json)
 CLASS_NAMES_NEW = [
-    # Stuff classes (0-22): no instances
-    "outside_body",         # 0
-    "inside_body_empty",    # 1
-    "liver",                # 2
-    "spleen",               # 3
-    "stomach",              # 4
-    "pancreas",             # 5
-    "gallbladder",          # 6
-    "urinary_bladder",      # 7
-    "prostate",             # 8
-    "heart",                # 9
-    "brain",                # 10
-    "thyroid_gland",        # 11
-    "spinal_cord",          # 12
-    "lung",                 # 13
-    "esophagus",            # 14
-    "trachea",              # 15
-    "small_bowel",          # 16
-    "duodenum",             # 17
-    "colon",                # 18
-    "spine",                # 19
-    "skull",                # 20
-    "sternum",              # 21
-    "costal_cartilages",    # 22
-    # Thing classes (23-35): have instances
-    "kidney",               # 23: 2 instances (L=1, R=2)
-    "adrenal_gland",        # 24: 2 instances
-    "rib",                  # 25: 24 instances (L1-12=1-12, R1-12=13-24)
-    "scapula",              # 26: 2 instances
-    "clavicula",            # 27: 2 instances
-    "humerus",              # 28: 2 instances
-    "hip",                  # 29: 2 instances
-    "femur",                # 30: 2 instances
-    "gluteus_maximus",      # 31: 2 instances
-    "gluteus_medius",       # 32: 2 instances
-    "gluteus_minimus",      # 33: 2 instances
-    "autochthon",           # 34: 2 instances
-    "iliopsoas",            # 35: 2 instances
+    "inside_body_empty",      # 0 (was 1)
+    "liver",                  # 1 (was 2)
+    "spleen",                 # 2 (was 3)
+    "kidney_left",            # 3 (was 4)
+    "kidney_right",           # 4 (was 5)
+    "stomach",                # 5 (was 6)
+    "pancreas",               # 6 (was 7)
+    "gallbladder",            # 7 (was 8)
+    "urinary_bladder",        # 8 (was 9)
+    "prostate",               # 9 (was 10)
+    "heart",                  # 10 (was 11)
+    "brain",                  # 11 (was 12)
+    "thyroid_gland",          # 12 (was 13)
+    "spinal_cord",            # 13 (was 14)
+    "lung",                   # 14 (was 15)
+    "esophagus",              # 15 (was 16)
+    "trachea",                # 16 (was 17)
+    "small_bowel",            # 17 (was 18)
+    "duodenum",               # 18 (was 19)
+    "colon",                  # 19 (was 20)
+    "adrenal_gland_left",     # 20 (was 21)
+    "adrenal_gland_right",    # 21 (was 22)
+    "spine",                  # 22 (was 23)
+    "rib_left_1",             # 23 (was 24)
+    "rib_left_2",             # 24 (was 25)
+    "rib_left_3",             # 25 (was 26)
+    "rib_left_4",             # 26 (was 27)
+    "rib_left_5",             # 27 (was 28)
+    "rib_left_6",             # 28 (was 29)
+    "rib_left_7",             # 29 (was 30)
+    "rib_left_8",             # 30 (was 31)
+    "rib_left_9",             # 31 (was 32)
+    "rib_left_10",            # 32 (was 33)
+    "rib_left_11",            # 33 (was 34)
+    "rib_left_12",            # 34 (was 35)
+    "rib_right_1",            # 35 (was 36)
+    "rib_right_2",            # 36 (was 37)
+    "rib_right_3",            # 37 (was 38)
+    "rib_right_4",            # 38 (was 39)
+    "rib_right_5",            # 39 (was 40)
+    "rib_right_6",            # 40 (was 41)
+    "rib_right_7",            # 41 (was 42)
+    "rib_right_8",            # 42 (was 43)
+    "rib_right_9",            # 43 (was 44)
+    "rib_right_10",           # 44 (was 45)
+    "rib_right_11",           # 45 (was 46)
+    "rib_right_12",           # 46 (was 47)
+    "skull",                  # 47 (was 48)
+    "sternum",                # 48 (was 49)
+    "costal_cartilages",      # 49 (was 50)
+    "scapula_left",           # 50 (was 51)
+    "scapula_right",          # 51 (was 52)
+    "clavicula_left",         # 52 (was 53)
+    "clavicula_right",        # 53 (was 54)
+    "humerus_left",           # 54 (was 55)
+    "humerus_right",          # 55 (was 56)
+    "hip_left",               # 56 (was 57)
+    "hip_right",              # 57 (was 58)
+    "femur_left",             # 58 (was 59)
+    "femur_right",            # 59 (was 60)
+    "gluteus_maximus_left",   # 60 (was 61)
+    "gluteus_maximus_right",  # 61 (was 62)
+    "gluteus_medius_left",    # 62 (was 63)
+    "gluteus_medius_right",   # 63 (was 64)
+    "gluteus_minimus_left",   # 64 (was 65)
+    "gluteus_minimus_right",  # 65 (was 66)
+    "autochthon_left",        # 66 (was 67)
+    "autochthon_right",       # 67 (was 68)
+    "iliopsoas_left",         # 68 (was 69)
+    "iliopsoas_right",        # 69 (was 70)
+    "rectum",                 # 70 (was 71)
 ]
 
 # Mapping from old 72-class IDs to new semantic + instance IDs
 # Format: old_id: (new_semantic_id, instance_id)
-# instance_id = 0 means stuff class (no instance)
+# All classes have instance_id=1 (full instance segmentation)
+# NOTE: Simple 1:1 mapping with offset -1 (except class 0 -> 255)
 _LABEL_MAPPING = {
-    # Stuff classes (direct mapping, instance_id = 0)
-    0: (0, 0),    # outside_body
-    1: (1, 0),    # inside_body_empty
-    2: (2, 0),    # liver
-    3: (3, 0),    # spleen
-    6: (4, 0),    # stomach
-    7: (5, 0),    # pancreas
-    8: (6, 0),    # gallbladder
-    9: (7, 0),    # urinary_bladder
-    10: (8, 0),   # prostate
-    11: (9, 0),   # heart
-    12: (10, 0),  # brain
-    13: (11, 0),  # thyroid_gland
-    14: (12, 0),  # spinal_cord
-    15: (13, 0),  # lung
-    16: (14, 0),  # esophagus
-    17: (15, 0),  # trachea
-    18: (16, 0),  # small_bowel
-    19: (17, 0),  # duodenum
-    20: (18, 0),  # colon
-    23: (19, 0),  # spine
-    48: (20, 0),  # skull
-    49: (21, 0),  # sternum
-    50: (22, 0),  # costal_cartilages
-
-    # Thing classes - paired organs (L=1, R=2)
-    4: (23, 1),   # kidney_left -> kidney, instance 1
-    5: (23, 2),   # kidney_right -> kidney, instance 2
-    21: (24, 1),  # adrenal_gland_left -> adrenal_gland, instance 1
-    22: (24, 2),  # adrenal_gland_right -> adrenal_gland, instance 2
-    51: (26, 1),  # scapula_left -> scapula, instance 1
-    52: (26, 2),  # scapula_right -> scapula, instance 2
-    53: (27, 1),  # clavicula_left -> clavicula, instance 1
-    54: (27, 2),  # clavicula_right -> clavicula, instance 2
-    55: (28, 1),  # humerus_left -> humerus, instance 1
-    56: (28, 2),  # humerus_right -> humerus, instance 2
-    57: (29, 1),  # hip_left -> hip, instance 1
-    58: (29, 2),  # hip_right -> hip, instance 2
-    59: (30, 1),  # femur_left -> femur, instance 1
-    60: (30, 2),  # femur_right -> femur, instance 2
-    61: (31, 1),  # gluteus_maximus_left -> gluteus_maximus, instance 1
-    62: (31, 2),  # gluteus_maximus_right -> gluteus_maximus, instance 2
-    63: (32, 1),  # gluteus_medius_left -> gluteus_medius, instance 1
-    64: (32, 2),  # gluteus_medius_right -> gluteus_medius, instance 2
-    65: (33, 1),  # gluteus_minimus_left -> gluteus_minimus, instance 1
-    66: (33, 2),  # gluteus_minimus_right -> gluteus_minimus, instance 2
-    67: (34, 1),  # autochthon_left -> autochthon, instance 1
-    68: (34, 2),  # autochthon_right -> autochthon, instance 2
-    69: (35, 1),  # iliopsoas_left -> iliopsoas, instance 1
-    70: (35, 2),  # iliopsoas_right -> iliopsoas, instance 2
-
-    # Ribs: 24 instances (L1-12 -> 1-12, R1-12 -> 13-24)
-    24: (25, 1),   # rib_left_1 -> rib, instance 1
-    25: (25, 2),   # rib_left_2 -> rib, instance 2
-    26: (25, 3),   # rib_left_3 -> rib, instance 3
-    27: (25, 4),   # rib_left_4 -> rib, instance 4
-    28: (25, 5),   # rib_left_5 -> rib, instance 5
-    29: (25, 6),   # rib_left_6 -> rib, instance 6
-    30: (25, 7),   # rib_left_7 -> rib, instance 7
-    31: (25, 8),   # rib_left_8 -> rib, instance 8
-    32: (25, 9),   # rib_left_9 -> rib, instance 9
-    33: (25, 10),  # rib_left_10 -> rib, instance 10
-    34: (25, 11),  # rib_left_11 -> rib, instance 11
-    35: (25, 12),  # rib_left_12 -> rib, instance 12
-    36: (25, 13),  # rib_right_1 -> rib, instance 13
-    37: (25, 14),  # rib_right_2 -> rib, instance 14
-    38: (25, 15),  # rib_right_3 -> rib, instance 15
-    39: (25, 16),  # rib_right_4 -> rib, instance 16
-    40: (25, 17),  # rib_right_5 -> rib, instance 17
-    41: (25, 18),  # rib_right_6 -> rib, instance 18
-    42: (25, 19),  # rib_right_7 -> rib, instance 19
-    43: (25, 20),  # rib_right_8 -> rib, instance 20
-    44: (25, 21),  # rib_right_9 -> rib, instance 21
-    45: (25, 22),  # rib_right_10 -> rib, instance 22
-    46: (25, 23),  # rib_right_11 -> rib, instance 23
-    47: (25, 24),  # rib_right_12 -> rib, instance 24
-
-    # Rectum (71) has no data in current dataset, map to 0 (outside_body)
-    71: (0, 0),
+    0: (255, 0),   # outside_body -> 255 (ignore)
+    1: (0, 1),     # inside_body_empty -> 0, instance 1
+    2: (1, 1),     # liver -> 1, instance 1
+    3: (2, 1),     # spleen -> 2, instance 1
+    4: (3, 1),     # kidney_left -> 3, instance 1
+    5: (4, 1),     # kidney_right -> 4, instance 1
+    6: (5, 1),     # stomach -> 5, instance 1
+    7: (6, 1),     # pancreas -> 6, instance 1
+    8: (7, 1),     # gallbladder -> 7, instance 1
+    9: (8, 1),     # urinary_bladder -> 8, instance 1
+    10: (9, 1),    # prostate -> 9, instance 1
+    11: (10, 1),   # heart -> 10, instance 1
+    12: (11, 1),   # brain -> 11, instance 1
+    13: (12, 1),   # thyroid_gland -> 12, instance 1
+    14: (13, 1),   # spinal_cord -> 13, instance 1
+    15: (14, 1),   # lung -> 14, instance 1
+    16: (15, 1),   # esophagus -> 15, instance 1
+    17: (16, 1),   # trachea -> 16, instance 1
+    18: (17, 1),   # small_bowel -> 17, instance 1
+    19: (18, 1),   # duodenum -> 18, instance 1
+    20: (19, 1),   # colon -> 19, instance 1
+    21: (20, 1),   # adrenal_gland_left -> 20, instance 1
+    22: (21, 1),   # adrenal_gland_right -> 21, instance 1
+    23: (22, 1),   # spine -> 22, instance 1
+    24: (23, 1),   # rib_left_1 -> 23, instance 1
+    25: (24, 1),   # rib_left_2 -> 24, instance 1
+    26: (25, 1),   # rib_left_3 -> 25, instance 1
+    27: (26, 1),   # rib_left_4 -> 26, instance 1
+    28: (27, 1),   # rib_left_5 -> 27, instance 1
+    29: (28, 1),   # rib_left_6 -> 28, instance 1
+    30: (29, 1),   # rib_left_7 -> 29, instance 1
+    31: (30, 1),   # rib_left_8 -> 30, instance 1
+    32: (31, 1),   # rib_left_9 -> 31, instance 1
+    33: (32, 1),   # rib_left_10 -> 32, instance 1
+    34: (33, 1),   # rib_left_11 -> 33, instance 1
+    35: (34, 1),   # rib_left_12 -> 34, instance 1
+    36: (35, 1),   # rib_right_1 -> 35, instance 1
+    37: (36, 1),   # rib_right_2 -> 36, instance 1
+    38: (37, 1),   # rib_right_3 -> 37, instance 1
+    39: (38, 1),   # rib_right_4 -> 38, instance 1
+    40: (39, 1),   # rib_right_5 -> 39, instance 1
+    41: (40, 1),   # rib_right_6 -> 40, instance 1
+    42: (41, 1),   # rib_right_7 -> 41, instance 1
+    43: (42, 1),   # rib_right_8 -> 42, instance 1
+    44: (43, 1),   # rib_right_9 -> 43, instance 1
+    45: (44, 1),   # rib_right_10 -> 44, instance 1
+    46: (45, 1),   # rib_right_11 -> 45, instance 1
+    47: (46, 1),   # rib_right_12 -> 46, instance 1
+    48: (47, 1),   # skull -> 47, instance 1
+    49: (48, 1),   # sternum -> 48, instance 1
+    50: (49, 1),   # costal_cartilages -> 49, instance 1
+    51: (50, 1),   # scapula_left -> 50, instance 1
+    52: (51, 1),   # scapula_right -> 51, instance 1
+    53: (52, 1),   # clavicula_left -> 52, instance 1
+    54: (53, 1),   # clavicula_right -> 53, instance 1
+    55: (54, 1),   # humerus_left -> 54, instance 1
+    56: (55, 1),   # humerus_right -> 55, instance 1
+    57: (56, 1),   # hip_left -> 56, instance 1
+    58: (57, 1),   # hip_right -> 57, instance 1
+    59: (58, 1),   # femur_left -> 58, instance 1
+    60: (59, 1),   # femur_right -> 59, instance 1
+    61: (60, 1),   # gluteus_maximus_left -> 60, instance 1
+    62: (61, 1),   # gluteus_maximus_right -> 61, instance 1
+    63: (62, 1),   # gluteus_medius_left -> 62, instance 1
+    64: (63, 1),   # gluteus_medius_right -> 63, instance 1
+    65: (64, 1),   # gluteus_minimus_left -> 64, instance 1
+    66: (65, 1),   # gluteus_minimus_right -> 65, instance 1
+    67: (66, 1),   # autochthon_left -> 66, instance 1
+    68: (67, 1),   # autochthon_right -> 67, instance 1
+    69: (68, 1),   # iliopsoas_left -> 68, instance 1
+    70: (69, 1),   # iliopsoas_right -> 69, instance 1
+    71: (70, 1),   # rectum -> 70, instance 1
 }
 
 
@@ -155,10 +182,11 @@ def create_label_mapping() -> Tuple[np.ndarray, np.ndarray]:
     Create lookup tables for label remapping.
 
     Returns:
-        semantic_lut: np.ndarray[72] - maps old_id -> new_semantic_id
-        instance_lut: np.ndarray[72] - maps old_id -> instance_id (0 for stuff)
+        semantic_lut: np.ndarray[72] - maps old_id -> new_semantic_id (255 for ignored)
+        instance_lut: np.ndarray[72] - maps old_id -> instance_id (1 for all valid classes)
     """
-    semantic_lut = np.zeros(N_CLASSES_OLD, dtype=np.uint8)
+    # Use 255 as default for unmapped classes (will be ignored)
+    semantic_lut = np.full(N_CLASSES_OLD, 255, dtype=np.uint8)
     instance_lut = np.zeros(N_CLASSES_OLD, dtype=np.uint8)
 
     for old_id, (new_sem_id, inst_id) in _LABEL_MAPPING.items():
@@ -174,14 +202,14 @@ _SEMANTIC_LUT, _INSTANCE_LUT = create_label_mapping()
 
 def remap_labels(voxel_labels_72: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Remap 72-class labels to 36-class semantic + instance labels.
+    Remap 72-class labels to 71-class semantic + instance labels.
 
     Args:
         voxel_labels_72: np.ndarray with values 0-71
 
     Returns:
-        semantic_labels: np.ndarray with values 0-35
-        instance_labels: np.ndarray with instance IDs (0 for stuff classes)
+        semantic_labels: np.ndarray with values 0-70 or 255 (ignore)
+        instance_labels: np.ndarray with instance IDs (1 for all valid classes)
     """
     # Clip to valid range to avoid index errors
     voxel_labels_72 = np.clip(voxel_labels_72, 0, N_CLASSES_OLD - 1)
@@ -194,20 +222,21 @@ def remap_labels(voxel_labels_72: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 def compute_new_class_frequencies(old_counts: np.ndarray) -> np.ndarray:
     """
-    Compute class frequencies for the new 36-class scheme.
+    Compute class frequencies for the new 71-class scheme.
+
+    Simple 1:1 mapping with offset -1:
+    - old_counts[0] (outside_body) is excluded
+    - old_counts[1:72] -> new_counts[0:71]
 
     Args:
         old_counts: np.ndarray[72] - voxel counts for original 72 classes
 
     Returns:
-        new_counts: np.ndarray[36] - aggregated voxel counts for new 36 classes
+        new_counts: np.ndarray[71] - voxel counts for new 71 classes
+                   (excludes outside_body/ignore class)
     """
-    new_counts = np.zeros(N_CLASSES_NEW, dtype=np.float64)
-
-    for old_id in range(N_CLASSES_OLD):
-        new_sem_id = _SEMANTIC_LUT[old_id]
-        new_counts[new_sem_id] += old_counts[old_id]
-
+    # Simple mapping: new class i = old class i+1
+    new_counts = old_counts[1:N_CLASSES_OLD].copy().astype(np.float64)
     return new_counts
 
 
@@ -215,22 +244,17 @@ def get_instance_count_for_class(semantic_id: int) -> int:
     """
     Get the number of instances for a given semantic class.
 
+    In the 71-class full instance scheme, every class has exactly 1 instance.
+
     Args:
-        semantic_id: New semantic class ID (0-35)
+        semantic_id: New semantic class ID (0-70)
 
     Returns:
-        Number of instances (0 for stuff, >0 for thing classes)
+        1 for all valid thing classes, 0 for invalid IDs
     """
-    if semantic_id not in THING_IDS:
-        return 0
-
-    # Count unique instance IDs for this semantic class
-    instance_ids = set()
-    for old_id, (new_sem_id, inst_id) in _LABEL_MAPPING.items():
-        if new_sem_id == semantic_id and inst_id > 0:
-            instance_ids.add(inst_id)
-
-    return len(instance_ids)
+    if semantic_id in THING_IDS:
+        return 1
+    return 0
 
 
 def validate_mapping():
@@ -241,27 +265,40 @@ def validate_mapping():
     assert len(_LABEL_MAPPING) == N_CLASSES_OLD, \
         f"Expected {N_CLASSES_OLD} mappings, got {len(_LABEL_MAPPING)}"
 
-    # Check semantic IDs are in valid range
-    assert semantic_lut.max() <= N_CLASSES_NEW - 1, \
-        f"Max semantic ID {semantic_lut.max()} exceeds {N_CLASSES_NEW - 1}"
+    # Check semantic IDs are in valid range (0-70 or 255)
+    valid_sem_ids = set(range(N_CLASSES_NEW)) | {255}
+    for sem_id in semantic_lut:
+        assert sem_id in valid_sem_ids, f"Invalid semantic ID {sem_id}"
 
-    # Check all 36 new classes are used (except possibly some)
+    # Check valid class range
     unique_sem_ids = np.unique(semantic_lut)
-    print(f"Unique semantic IDs used: {len(unique_sem_ids)}")
+    print(f"Unique semantic IDs used: {unique_sem_ids.tolist()}")
+    print(f"Number of unique semantic classes (excluding 255): {len([s for s in unique_sem_ids if s != 255])}")
 
-    # Check thing classes have instances
-    for thing_id in THING_IDS:
+    # Check all thing classes have instances
+    print(f"\nAll {len(THING_IDS)} classes are thing classes (instance_id=1):")
+    for thing_id in THING_IDS[:5]:  # Show first 5
         inst_count = get_instance_count_for_class(thing_id)
-        assert inst_count > 0, f"Thing class {thing_id} has no instances"
-        print(f"Thing class {thing_id} ({CLASS_NAMES_NEW[thing_id]}): {inst_count} instances")
+        print(f"  Thing class {thing_id} ({CLASS_NAMES_NEW[thing_id]}): {inst_count} instance")
+    print(f"  ... (and {len(THING_IDS) - 5} more)")
 
-    # Check stuff classes have no instances
-    for old_id, (new_sem_id, inst_id) in _LABEL_MAPPING.items():
-        if new_sem_id not in THING_IDS:
-            assert inst_id == 0, \
-                f"Stuff class {new_sem_id} has non-zero instance ID {inst_id}"
+    # Verify class 0 (original outside_body) maps to 255
+    assert semantic_lut[0] == 255, f"Original class 0 should map to 255, got {semantic_lut[0]}"
 
-    print("Label mapping validation passed!")
+    # Verify class 1 (original inside_body_empty) maps to 0
+    assert semantic_lut[1] == 0, f"Original class 1 should map to 0, got {semantic_lut[1]}"
+
+    # Verify simple 1:1 mapping
+    for old_id in range(1, N_CLASSES_OLD):
+        expected_new_id = old_id - 1
+        assert semantic_lut[old_id] == expected_new_id, \
+            f"Old class {old_id} should map to {expected_new_id}, got {semantic_lut[old_id]}"
+
+    print(f"\nLabel mapping validation passed!")
+    print(f"  - {N_CLASSES_NEW} output classes (0-70)")
+    print(f"  - Original class 0 (outside_body) -> 255 (ignore)")
+    print(f"  - Original class 1-71 -> 0-70 (all with instance_id=1)")
+    print(f"  - All {len(THING_IDS)} classes are thing classes")
     return True
 
 
